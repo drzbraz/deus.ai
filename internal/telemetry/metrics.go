@@ -3,6 +3,7 @@ package telemetry
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -79,5 +80,8 @@ func RegisterOutboxBacklog(meter metric.Meter, countPending func(context.Context
 			o.Observe(pending)
 			return nil
 		}))
-	return err
+	if err != nil {
+		return fmt.Errorf("register outbox.pending gauge: %w", err)
+	}
+	return nil
 }

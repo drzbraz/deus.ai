@@ -1,0 +1,58 @@
+# golangci-lint v2 configuration. Run with `make lint`.
+version: "2"
+
+run:
+  build-tags: [integration, e2e]
+  timeout: 5m
+
+linters:
+  default: standard # errcheck, govet, ineffassign, staticcheck, unused
+  enable:
+    - bodyclose       # unclosed HTTP response bodies
+    - contextcheck    # functions that drop the incoming context
+    - errorlint       # error comparisons that break with wrapping (use errors.Is/As)
+    - gocritic        # assorted correctness and style checks
+    - gosec           # security issues
+    - misspell
+    - nilerr          # returning nil when an error was checked
+    - noctx           # HTTP requests without a context
+    - revive          # idiomatic Go style
+    - rowserrcheck    # unchecked rows.Err()
+    - sqlclosecheck   # unclosed sql rows/statements
+    - unconvert       # unnecessary conversions
+    - unparam         # unused function parameters/results
+    - usestdlibvars   # http.MethodGet instead of "GET", etc.
+    - wrapcheck       # errors from other packages returned without context
+  settings:
+    revive:
+      rules:
+        - name: exported
+          disabled: true # doc comments only where they add value (see README)
+    wrapcheck:
+      # Errors are wrapped once at each layer boundary (see README); only
+      # errors coming from third-party packages must always gain context.
+      ignore-package-globs:
+        - github.com/drzbraz/deus.ai/*
+      ignore-sigs:
+        - .Errorf(
+        - errors.New(
+        - errors.Join(
+        - .Wrap(
+        - .WithinTx(   # the unit of work returns the callback's (already wrapped) error
+        - (*bytes.Buffer).Write(
+        - .Err() # context errors are returned as-is so callers can errors.Is them
+  exclusions:
+    presets: [comments, std-error-handling, common-false-positives]
+    rules:
+      # Tests may use fixed paths, ignore errors on cleanup, etc.
+      - path: _test\.go|tests/
+        linters: [gosec, wrapcheck, noctx, errcheck, unparam, contextcheck, bodyclose]
+      - path: tests/
+        linters: [revive]
+        text: dot-imports
+
+formatters:
+  enable: [gofmt, goimports]
+  settings:
+    goimports:
+      local-prefixes: [github.com/drzbraz/deus.ai]

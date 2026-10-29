@@ -136,7 +136,7 @@ func TestLatencyMetricUsesRoutePattern(t *testing.T) {
 	require.True(t, ok, "http.route attribute missing")
 	assert.Equal(t, "/api/v1/cargoes/{cargoID}", route.AsString())
 	for _, attr := range point.Attributes.ToSlice() {
-		assert.NotContains(t, attr.Value.Emit(), cargoID.String(), "raw id leaked into %s", attr.Key)
+		assert.NotContains(t, attr.Value.String(), cargoID.String(), "raw id leaked into %s", attr.Key)
 	}
 	assert.Equal(t, telemetry.LatencyBuckets, point.Bounds, "custom latency buckets must apply")
 }

@@ -114,5 +114,5 @@ func scanVessel(row pgx.Row, withLoad bool) (domain.Vessel, error) {
 	}
 	err := row.Scan(dest...)
 	v.CreatedAt, v.UpdatedAt = v.CreatedAt.UTC(), v.UpdatedAt.UTC()
-	return v, err
+	return v, err //nolint:wrapcheck // callers wrap with wrapErr, which also classifies the error
 }

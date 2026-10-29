@@ -44,7 +44,7 @@ func Load() (Config, error) {
 		LogLevel:        r.string("LOG_LEVEL", "info"),
 
 		DatabaseURL:        r.string("DATABASE_URL", "postgres://deus:deus@localhost:5433/logistics?sslmode=disable"),
-		DBMaxConns:         int32(r.int("DB_MAX_CONNS", 20)),
+		DBMaxConns:         r.int32("DB_MAX_CONNS", 20),
 		DBStatementTimeout: r.duration("DB_STATEMENT_TIMEOUT", 5*time.Second),
 		DBConnectAttempts:  r.int("DB_CONNECT_ATTEMPTS", 10),
 
@@ -77,6 +77,13 @@ func (r *reader) string(key, fallback string) string {
 
 func (r *reader) int(key string, fallback int) int {
 	return parse(r, key, fallback, strconv.Atoi)
+}
+
+func (r *reader) int32(key string, fallback int32) int32 {
+	return parse(r, key, fallback, func(raw string) (int32, error) {
+		value, err := strconv.ParseInt(raw, 10, 32)
+		return int32(value), err
+	})
 }
 
 func (r *reader) bool(key string, fallback bool) bool {

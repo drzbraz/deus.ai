@@ -25,10 +25,16 @@ type Dependencies struct {
 	RequestTimeout   time.Duration
 }
 
-// NewRouter builds the HTTP handler. Middleware order matters:
-// otelhttp (outermost) starts the span and latency timer, so everything else,
-// including logs, carries the trace id.
+// NewRouter builds the HTTP handler. otelhttp is the outermost layer: it
+// starts the span and latency timer, so everything else, including logs,
+// carries the trace id.
 func NewRouter(d Dependencies) http.Handler {
+	return otelhttp.NewHandler(routes(d), "http.server")
+}
+
+// routes registers every endpoint on a chi router. Middleware order matters:
+// request id first, so every later step can log it.
+func routes(d Dependencies) chi.Router {
 	rs := responder{log: d.Logger}
 	vessels := vesselHandler{rs, d.Vessels}
 	cargoes := cargoHandler{rs, d.Cargoes}
@@ -49,6 +55,8 @@ func NewRouter(d Dependencies) http.Handler {
 
 	r.Get("/healthz", health.live)
 	r.Get("/readyz", health.ready)
+	r.Get("/openapi.yaml", serveSpec)
+	r.Get("/docs", serveDocs)
 
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Route("/vessels", func(r chi.Router) {
@@ -69,5 +77,5 @@ func NewRouter(d Dependencies) http.Handler {
 		})
 	})
 
-	return otelhttp.NewHandler(r, "http.server")
+	return r
 }

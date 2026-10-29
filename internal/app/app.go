@@ -79,7 +79,8 @@ func New(ctx context.Context, cfg config.Config, log *zap.Logger) (app *App, err
 		return nil, err
 	}
 
-	if a.listener, err = net.Listen("tcp", cfg.HTTPAddr); err != nil {
+	var listenConfig net.ListenConfig
+	if a.listener, err = listenConfig.Listen(ctx, "tcp", cfg.HTTPAddr); err != nil {
 		return nil, fmt.Errorf("listen on %s: %w", cfg.HTTPAddr, err)
 	}
 	return a, nil
