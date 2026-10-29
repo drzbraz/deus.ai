@@ -1,0 +1,7 @@
+apiVersion: 1
+providers:
+  - name: logistics
+    folder: Logistics
+    type: file
+    options:
+      path: /var/lib/grafana/dashboards

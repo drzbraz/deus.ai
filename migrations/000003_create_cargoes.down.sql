@@ -1,0 +1,2 @@
+DROP TABLE IF EXISTS cargoes;
+DROP TYPE IF EXISTS cargo_status;
