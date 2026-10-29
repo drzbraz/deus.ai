@@ -13,7 +13,7 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/api ./cmd/api
 
 # ---- test: run the integration suite inside Docker ----------------------
 FROM build AS test
-ENTRYPOINT ["go", "test", "-tags=integration", "-p", "1", "-count=1", "-cover", "./..."]
+ENTRYPOINT ["go", "test", "-tags=integration,e2e", "-p", "1", "-count=1", "-cover", "./..."]
 
 # ---- runtime: minimal, non-root image ------------------------------------
 FROM gcr.io/distroless/static-debian12:nonroot AS runtime

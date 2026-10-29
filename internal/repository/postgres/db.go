@@ -53,7 +53,7 @@ func NewTxManager(pool *pgxpool.Pool) *TxManager {
 func (m *TxManager) WithinTx(ctx context.Context, fn func(ctx context.Context) error) error {
 	tx, err := m.begin(ctx)
 	if err != nil {
-		return wrapErr("begin transaction", err)
+		return err
 	}
 	// Rollback is a no-op after a successful commit. WithoutCancel ensures we
 	// still release locks when the request context was cancelled.
@@ -68,11 +68,21 @@ func (m *TxManager) WithinTx(ctx context.Context, fn func(ctx context.Context) e
 	return nil
 }
 
+// begin starts a transaction, or a savepoint inside the one already in ctx.
 func (m *TxManager) begin(ctx context.Context) (pgx.Tx, error) {
+	var (
+		tx  pgx.Tx
+		err error
+	)
 	if outer, ok := ctx.Value(txKey{}).(pgx.Tx); ok {
-		return outer.Begin(ctx)
+		tx, err = outer.Begin(ctx)
+	} else {
+		tx, err = m.pool.Begin(ctx)
 	}
-	return m.pool.Begin(ctx)
+	if err != nil {
+		return nil, wrapErr("begin transaction", err)
+	}
+	return tx, nil
 }
 
 // Postgres error codes we translate into domain errors.

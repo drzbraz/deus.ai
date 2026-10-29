@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"runtime/debug"
@@ -48,9 +49,9 @@ func accessLog(base *zap.Logger) func(http.Handler) http.Handler {
 func recoverer(rs responder) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			defer func() {
+			defer func() { //nolint:contextcheck // rs.error reads the request context from r
 				if rec := recover(); rec != nil {
-					if rec == http.ErrAbortHandler {
+					if err, ok := rec.(error); ok && errors.Is(err, http.ErrAbortHandler) {
 						panic(rec)
 					}
 					logger.WithContext(r.Context(), rs.log).Error("panic recovered",

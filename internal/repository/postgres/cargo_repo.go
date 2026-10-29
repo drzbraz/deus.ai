@@ -106,5 +106,5 @@ func scanCargo(row pgx.Row) (domain.Cargo, error) {
 	err := row.Scan(&c.ID, &c.Name, &c.Description, &c.WeightKg, &status, &c.VesselID, &c.Version, &c.CreatedAt, &c.UpdatedAt)
 	c.Status = domain.Status(status)
 	c.CreatedAt, c.UpdatedAt = c.CreatedAt.UTC(), c.UpdatedAt.UTC()
-	return c, err
+	return c, err //nolint:wrapcheck // callers wrap with wrapErr, which also classifies the error
 }

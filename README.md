@@ -10,7 +10,7 @@ On top of that it has **OpenTelemetry observability**: per-endpoint latency metr
 | Storage | PostgreSQL 16 via `pgx/v5`, raw SQL, `golang-migrate` migrations embedded in the binary |
 | Messaging | RabbitMQ (quorum queues, publisher confirms, dead-letter queue) |
 | Observability | OpenTelemetry → Collector → Jaeger (traces) + Prometheus (metrics) → Grafana |
-| Tests | unit + integration + end-to-end, **93% combined coverage**, race detector on |
+| Tests | unit + integration + black-box e2e/resilience/schema suites (~430 cases), **94% combined coverage**, race detector on |
 
 ---
 
@@ -39,6 +39,8 @@ make docker-run      # builds the API image and starts the whole stack
 | Service | URL |
 |---|---|
 | **API** | http://localhost:8080 |
+| **Swagger UI** (interactive API docs) | http://localhost:8080/docs |
+| OpenAPI 3 contract | http://localhost:8080/openapi.yaml ([`api/openapi.yaml`](api/openapi.yaml)) |
 | Grafana dashboard "Logistics API" | http://localhost:3000 (no login) |
 | Jaeger (traces) | http://localhost:16686 |
 | Prometheus | http://localhost:9090 |
@@ -91,6 +93,10 @@ Configuration comes from environment variables. The defaults work with `make dep
 ---
 
 ## API documentation
+
+The machine-readable contract is [`api/openapi.yaml`](api/openapi.yaml). It is embedded in the binary and served at `/openapi.yaml`, and Swagger UI at `/docs` lets you try every endpoint. Two checks keep it honest:
+- a unit test fails if a route exists without being documented, or the reverse;
+- every response received by the black-box suites is validated against it (status code documented, exact schema, no extra fields).
 
 Base path: `/api/v1`. Request bodies must be `Content-Type: application/json`. All timestamps are RFC 3339 in UTC.
 
@@ -299,9 +305,15 @@ The latency histogram is labelled with the **route pattern** (`/api/v1/cargoes/{
 make test               # unit tests, no infrastructure (race detector on)
 make test-integration   # unit + integration + end-to-end against disposable Postgres & RabbitMQ (docker-compose.test.yml)
 make test-docker        # the same suite, run entirely inside Docker (no local Go needed)
+make test-e2e           # black-box suites in tests/ (e2e, resilience, schema)
+make test-e2e-stack     # black-box e2e suite against the running `make docker-run` stack
+make test-all           # every suite with -race
 make coverage           # combined coverage report (coverage.html); fails under 80%
-make lint               # gofmt + go vet
+make lint               # golangci-lint: vet, staticcheck, gosec, errorlint, wrapcheck, gofmt/goimports, ...
+make vuln               # govulncheck: known vulnerabilities in dependencies and the Go toolchain
 ```
+
+Besides the unit and integration tests next to the code, [`tests/`](tests/README.md) holds a separate **black-box suite** (about 240 cases). It covers every API flow and edge case over HTTP, plus fault injection (database and broker outages, lock timeouts, poison and duplicate messages, crashes, shutdown under load) and schema integrity.
 
 | Layer | How it is tested |
 |---|---|
@@ -332,6 +344,20 @@ make lint               # gofmt + go vet
 | History cannot be modified (UPDATE/DELETE/TRUNCATE) | `TestAuditTables_AreAppendOnly` |
 | Graceful shutdown drains in-flight requests | `TestServe_DrainsInFlightRequestsOnShutdown` |
 | Latency metric uses route patterns, not ids | `TestLatencyMetricUsesRoutePattern` |
+
+### Continuous integration
+
+`.github/workflows/ci.yml` runs on every push to `main` and on every pull request:
+
+| Job | What it does |
+|---|---|
+| Lint | golangci-lint v2 with the project config (`.golangci.yml`) |
+| Vulnerability scan | `govulncheck`: fails if our code reaches a known vulnerable function |
+| Unit tests | `make test` with the race detector |
+| Integration, e2e, resilience & schema | Postgres and RabbitMQ as service containers; every suite with `-race`; **fails under 80% coverage**; coverage report uploaded as an artifact |
+| Docker stack + black-box e2e | builds the image, boots the full `docker-compose` stack, runs the e2e and schema suites against it over HTTP |
+
+Tool versions are pinned in the `Makefile` and the workflow, so local runs and CI behave the same.
 
 ---
 

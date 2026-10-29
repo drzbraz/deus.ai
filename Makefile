@@ -1,5 +1,8 @@
-# Coverage gate for `make coverage` (unit + integration, all internal packages).
+# Coverage gate for `make coverage` (every suite, all internal packages).
 COVERAGE_MIN  := 80
+# Tool versions are pinned so local runs and CI behave identically.
+GOLANGCI_LINT := go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
+GOVULNCHECK   := go run golang.org/x/vuln/cmd/govulncheck@v1.9.0
 TEST_COMPOSE  := docker compose -f docker-compose.test.yml
 TEST_ENV      := TEST_DATABASE_URL=postgres://deus:deus@localhost:55432/logistics_test?sslmode=disable \
                  TEST_RABBITMQ_URL=amqp://deus_user:deus_pass@localhost:56720/
@@ -45,9 +48,16 @@ build: ## Build the binary into bin/api
 ## --- Quality ----------------------------------------------------------------
 
 .PHONY: lint
-lint: ## gofmt check + go vet
-	@test -z "$$(gofmt -l .)" || (echo "gofmt needed on:"; gofmt -l .; exit 1)
-	go vet -tags=integration ./...
+lint: ## golangci-lint (vet, staticcheck, gosec, errorlint, wrapcheck, formatting, ...)
+	$(GOLANGCI_LINT) run ./...
+
+.PHONY: lint-fix
+lint-fix: ## Apply automatic lint and formatting fixes
+	$(GOLANGCI_LINT) run --fix ./...
+
+.PHONY: vuln
+vuln: ## Scan dependencies and the Go toolchain for known vulnerabilities
+	$(GOVULNCHECK) ./...
 
 .PHONY: test
 test: ## Unit tests (no infrastructure needed)
@@ -66,15 +76,38 @@ test-integration: test-infra-up ## Unit + integration tests against disposable P
 	$(TEST_ENV) go test -race -tags=integration -p 1 -count=1 ./... ; \
 	status=$$?; $(MAKE) test-infra-down; exit $$status
 
+.PHONY: test-e2e
+test-e2e: test-infra-up ## Black-box suites in tests/ (e2e, resilience, schema) against an in-process API
+	$(TEST_ENV) go test -tags=e2e -p 1 -count=1 ./tests/... ; \
+	status=$$?; $(MAKE) test-infra-down; exit $$status
+
+.PHONY: test-e2e-stack
+test-e2e-stack: ## Black-box e2e suite against the running `make docker-run` stack
+	API_BASE_URL=http://localhost:8080 \
+	E2E_DATABASE_URL=postgres://deus:deus@localhost:5433/logistics?sslmode=disable \
+	E2E_RABBITMQ_URL=amqp://deus_user:deus_pass@localhost:5672/ \
+	go test -tags=e2e -p 1 -count=1 ./tests/e2e/ ./tests/schema/
+
+.PHONY: test-all
+test-all: test-infra-up ## Every suite: unit, integration, e2e, resilience, schema
+	$(TEST_ENV) go test -race -tags=integration,e2e -p 1 -count=1 ./... ; \
+	status=$$?; $(MAKE) test-infra-down; exit $$status
+
 .PHONY: test-docker
 test-docker: ## Run the whole test suite inside Docker (no local Go needed)
 	$(TEST_COMPOSE) run --rm --build tests ; \
 	status=$$?; $(MAKE) test-infra-down; exit $$status
 
 .PHONY: coverage
-coverage: test-infra-up ## Combined coverage report; fails below COVERAGE_MIN%
-	$(TEST_ENV) go test -tags=integration -p 1 -count=1 -coverpkg=./internal/... -coverprofile=coverage.out ./... ; \
-	status=$$?; $(MAKE) test-infra-down; test $$status -eq 0 || exit $$status
+coverage: test-infra-up ## Every suite with combined coverage (coverage.html); fails under COVERAGE_MIN%
+	$(TEST_ENV) $(MAKE) ci-test ; \
+	status=$$?; $(MAKE) test-infra-down; exit $$status
+
+# ci-test assumes Postgres and RabbitMQ are already reachable (CI service
+# containers or `make test-infra-up`).
+.PHONY: ci-test
+ci-test:
+	go test -race -p 1 -count=1 -tags=integration,e2e -coverpkg=./internal/... -coverprofile=coverage.out ./...
 	go tool cover -html=coverage.out -o coverage.html
 	@total=$$(go tool cover -func=coverage.out | awk '/^total:/ {sub("%","",$$3); print $$3}'); \
 	echo "total coverage: $$total% (minimum $(COVERAGE_MIN)%)"; \

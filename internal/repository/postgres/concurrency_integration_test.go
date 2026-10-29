@@ -303,7 +303,7 @@ func runConcurrently(n int, fn func() error) []error {
 func count(errs []error, want error) int {
 	n := 0
 	for _, err := range errs {
-		if err == want {
+		if errors.Is(err, want) {
 			n++
 		}
 	}

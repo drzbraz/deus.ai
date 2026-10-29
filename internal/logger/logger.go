@@ -24,7 +24,11 @@ func New(level string) (*zap.Logger, error) {
 	cfg.EncoderConfig.TimeKey = "time"
 	cfg.EncoderConfig.EncodeTime = zapcore.RFC3339NanoTimeEncoder
 
-	return cfg.Build()
+	log, err := cfg.Build()
+	if err != nil {
+		return nil, fmt.Errorf("build logger: %w", err)
+	}
+	return log, nil
 }
 
 // WithContext returns log annotated with the request id and trace/span ids

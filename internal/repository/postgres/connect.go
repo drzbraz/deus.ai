@@ -48,11 +48,11 @@ func Connect(ctx context.Context, cfg PoolConfig, policy backoff.Policy, log *za
 	attempt := 0
 	err = backoff.Retry(ctx, policy, cfg.ConnectAttempts, func(ctx context.Context) error {
 		attempt++
-		pingErr := pool.Ping(ctx)
-		if pingErr != nil {
+		if pingErr := pool.Ping(ctx); pingErr != nil {
 			log.Warn("database not ready, retrying", zap.Int("attempt", attempt), zap.Error(pingErr))
+			return fmt.Errorf("ping: %w", pingErr)
 		}
-		return pingErr
+		return nil
 	})
 	if err != nil {
 		pool.Close()

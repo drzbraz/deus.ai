@@ -39,6 +39,7 @@ func TestLoad_ReportsEveryInvalidVariable(t *testing.T) {
 	t.Setenv("DB_MAX_CONNS", "many")
 	t.Setenv("RELAY_ENABLED", "maybe")
 	t.Setenv("REQUEST_TIMEOUT", "5")
+	t.Setenv("DB_STATEMENT_TIMEOUT", "soon")
 
 	_, err := Load()
 
@@ -46,4 +47,12 @@ func TestLoad_ReportsEveryInvalidVariable(t *testing.T) {
 	assert.Contains(t, err.Error(), "DB_MAX_CONNS")
 	assert.Contains(t, err.Error(), "RELAY_ENABLED")
 	assert.Contains(t, err.Error(), "REQUEST_TIMEOUT")
+}
+
+func TestLoad_RejectsPoolSizeOutOfInt32Range(t *testing.T) {
+	t.Setenv("DB_MAX_CONNS", "3000000000")
+
+	_, err := Load()
+
+	assert.ErrorContains(t, err, "DB_MAX_CONNS")
 }

@@ -52,7 +52,7 @@ func declareTopology(ch *amqp.Channel) error {
 		{"declare dead-letter queue", func() error {
 			_, err := ch.QueueDeclare(DeadLetterQueue, true, false, false, false,
 				amqp.Table{amqp.QueueTypeArg: amqp.QueueTypeQuorum})
-			return err
+			return err //nolint:wrapcheck // wrapped with the step name below
 		}},
 		{"bind dead-letter queue", func() error {
 			return ch.QueueBind(DeadLetterQueue, "", DeadLetterExchange, false, nil)
@@ -63,7 +63,7 @@ func declareTopology(ch *amqp.Channel) error {
 				"x-delivery-limit":       deliveryLimit,
 				"x-dead-letter-exchange": DeadLetterExchange,
 			})
-			return err
+			return err //nolint:wrapcheck // wrapped with the step name below
 		}},
 		{"bind queue", func() error {
 			return ch.QueueBind(Queue, events.RoutingKeyStatusChanged, Exchange, false, nil)

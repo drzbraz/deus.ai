@@ -1,0 +1,643 @@
+openapi: 3.0.3
+info:
+  title: Logistics API
+  version: 1.0.0
+  description: |
+    Tracks cargoes, the vessels that carry them and the complete, append-only
+    movement history of every cargo. Every cargo status change is also
+    published as an event (`cargo.status_changed`) and stored by a consumer.
+
+    **Status lifecycle (forward only):** `pending → in_transit → delivered`.
+
+    **Safe retries:** send an `Idempotency-Key` on POST/PATCH. A retry, or a
+    duplicate sent at the same moment, receives the original response with
+    `Idempotent-Replayed: true`, and the side effect happens once.
+
+    **Optimistic concurrency:** `GET /cargoes/{cargoID}` returns an `ETag`;
+    send it as `If-Match` on a status change to get `412` if someone else
+    changed the cargo first.
+servers:
+  - url: http://localhost:8080
+tags:
+  - name: Vessels
+  - name: Cargoes
+  - name: Tracking
+  - name: Health
+
+paths:
+  /api/v1/vessels:
+    post:
+      tags: [Vessels]
+      summary: Create a vessel
+      operationId: createVessel
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateVesselRequest' }
+            example: { name: Ever Given, capacity_kg: 20000, current_location: Rotterdam }
+      responses:
+        '201':
+          description: Vessel created
+          headers:
+            Location: { $ref: '#/components/headers/Location' }
+            Idempotent-Replayed: { $ref: '#/components/headers/IdempotentReplayed' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/VesselEnvelope' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+    get:
+      tags: [Vessels]
+      summary: List vessels
+      operationId: listVessels
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: A page of vessels, oldest first
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/VesselPage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+
+  /api/v1/vessels/{vesselID}:
+    parameters:
+      - $ref: '#/components/parameters/VesselID'
+    get:
+      tags: [Vessels]
+      summary: Get vessel details (name, capacity, current location, load)
+      operationId: getVessel
+      responses:
+        '200':
+          description: The vessel
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/VesselEnvelope' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+
+  /api/v1/vessels/{vesselID}/location:
+    parameters:
+      - $ref: '#/components/parameters/VesselID'
+    patch:
+      tags: [Vessels]
+      summary: Move a vessel
+      description: Existing tracking history is not affected.
+      operationId: updateVesselLocation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateVesselLocationRequest' }
+            example: { current_location: Singapore }
+      responses:
+        '200':
+          description: The moved vessel
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/VesselEnvelope' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+
+  /api/v1/cargoes:
+    post:
+      tags: [Cargoes]
+      summary: Create a cargo on a vessel
+      description: |
+        The cargo starts as `pending` and its first tracking entry is recorded
+        at the vessel's current location. Fails with `409` when the vessel
+        does not have enough free capacity.
+      operationId: createCargo
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateCargoRequest' }
+            example: { name: Coffee beans, description: Arabica, weight_kg: 1200, vessel_id: 01a18920-e2a7-754b-b25f-698f83d4a062 }
+      responses:
+        '201':
+          description: Cargo created
+          headers:
+            Location: { $ref: '#/components/headers/Location' }
+            ETag: { $ref: '#/components/headers/ETag' }
+            Idempotent-Replayed: { $ref: '#/components/headers/IdempotentReplayed' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CargoEnvelope' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+    get:
+      tags: [Cargoes]
+      summary: List cargoes
+      operationId: listCargoes
+      parameters:
+        - name: status
+          in: query
+          schema: { $ref: '#/components/schemas/CargoStatus' }
+        - name: vessel_id
+          in: query
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: A page of cargoes, oldest first
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CargoPage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+
+  /api/v1/cargoes/{cargoID}:
+    parameters:
+      - $ref: '#/components/parameters/CargoID'
+    get:
+      tags: [Cargoes]
+      summary: Get a cargo
+      operationId: getCargo
+      responses:
+        '200':
+          description: The cargo
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CargoEnvelope' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+
+  /api/v1/cargoes/{cargoID}/status:
+    parameters:
+      - $ref: '#/components/parameters/CargoID'
+    patch:
+      tags: [Cargoes]
+      summary: Change the cargo status
+      description: |
+        Only `pending → in_transit` and `in_transit → delivered` are allowed;
+        anything else is `409` and emits no event. On success a tracking entry
+        is recorded (at `location`, or the vessel's current location) and a
+        `cargo.status_changed` event is published.
+      operationId: updateCargoStatus
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateCargoStatusRequest' }
+            example: { status: in_transit, location: Suez Canal, note: left port }
+      responses:
+        '200':
+          description: The updated cargo
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+            Idempotent-Replayed: { $ref: '#/components/headers/IdempotentReplayed' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CargoEnvelope' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+
+  /api/v1/cargoes/{cargoID}/tracking:
+    parameters:
+      - $ref: '#/components/parameters/CargoID'
+    get:
+      tags: [Tracking]
+      summary: Complete movement history, oldest first
+      operationId: getTrackingHistory
+      responses:
+        '200':
+          description: Every tracking entry of the cargo
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TrackingEntryList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+    post:
+      tags: [Tracking]
+      summary: Record a movement without changing the status
+      operationId: recordMovement
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RecordMovementRequest' }
+            example: { location: Strait of Malacca, note: on schedule }
+      responses:
+        '201':
+          description: The recorded entry
+          headers:
+            Idempotent-Replayed: { $ref: '#/components/headers/IdempotentReplayed' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TrackingEntryEnvelope' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+
+  /api/v1/cargoes/{cargoID}/events:
+    parameters:
+      - $ref: '#/components/parameters/CargoID'
+    get:
+      tags: [Tracking]
+      summary: Status-change events stored by the event consumer
+      operationId: getCargoEvents
+      responses:
+        '200':
+          description: Stored events, oldest first
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CargoEventList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+
+  /healthz:
+    get:
+      tags: [Health]
+      summary: Liveness probe (never checks dependencies)
+      operationId: liveness
+      responses:
+        '200':
+          description: The process is running
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [status]
+                properties:
+                  status: { type: string, enum: [ok] }
+
+  /readyz:
+    get:
+      tags: [Health]
+      summary: Readiness probe
+      description: Postgres is required. RabbitMQ is reported but only marks the instance `degraded`, because writes keep working through the outbox.
+      operationId: readiness
+      responses:
+        '200':
+          description: Ready (or degraded) to serve traffic
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Readiness' }
+        '503':
+          description: A critical dependency is down
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Readiness' }
+
+components:
+  parameters:
+    VesselID:
+      name: vesselID
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    CargoID:
+      name: cargoID
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    Limit:
+      name: limit
+      in: query
+      description: Page size; 0 or absent means 20.
+      schema: { type: integer, minimum: 0, maximum: 100, default: 20 }
+    Offset:
+      name: offset
+      in: query
+      schema: { type: integer, minimum: 0, default: 0 }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      description: Unique per logical operation; makes retries and concurrent duplicates safe.
+      schema: { type: string, maxLength: 255 }
+    IfMatch:
+      name: If-Match
+      in: header
+      description: ETag from a previous response (e.g. `"3"`); `*` disables the check.
+      schema: { type: string }
+
+  headers:
+    Location:
+      description: URL of the created resource
+      schema: { type: string }
+    ETag:
+      description: Current version of the cargo, e.g. `"2"`
+      schema: { type: string }
+    IdempotentReplayed:
+      description: Present (`true`) when the response is a replay of an earlier request with the same Idempotency-Key
+      schema: { type: string, enum: ['true'] }
+    RetryAfter:
+      description: Seconds to wait before retrying
+      schema: { type: string }
+
+  responses:
+    BadRequest:
+      description: Malformed request (invalid JSON, unknown field, invalid id or header)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    Conflict:
+      description: |
+        Business rule violation: `invalid_status_transition`,
+        `vessel_capacity_exceeded`, `cargo_already_delivered` or `already_exists`
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    PreconditionFailed:
+      description: '`If-Match` does not match the current version'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    PayloadTooLarge:
+      description: Body larger than 1 MiB
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    UnsupportedMediaType:
+      description: Body is not `application/json`
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    ValidationFailed:
+      description: Invalid field values (`details` lists each field), or `idempotency_key_reused`
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    InternalError:
+      description: Unexpected failure; details are logged, never returned
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    ServiceUnavailable:
+      description: Database down, overloaded or timed out; safe to retry later
+      headers:
+        Retry-After: { $ref: '#/components/headers/RetryAfter' }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+
+  schemas:
+    CargoStatus:
+      type: string
+      enum: [pending, in_transit, delivered]
+
+    CreateVesselRequest:
+      type: object
+      additionalProperties: false
+      required: [name, capacity_kg, current_location]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+        capacity_kg: { type: number, exclusiveMinimum: true, minimum: 0, maximum: 1000000000 }
+        current_location: { type: string, minLength: 1, maxLength: 200 }
+
+    UpdateVesselLocationRequest:
+      type: object
+      additionalProperties: false
+      required: [current_location]
+      properties:
+        current_location: { type: string, minLength: 1, maxLength: 200 }
+
+    CreateCargoRequest:
+      type: object
+      additionalProperties: false
+      required: [name, weight_kg, vessel_id]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+        description: { type: string, maxLength: 1000 }
+        weight_kg: { type: number, exclusiveMinimum: true, minimum: 0, maximum: 1000000000 }
+        vessel_id: { type: string, format: uuid }
+
+    UpdateCargoStatusRequest:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status: { $ref: '#/components/schemas/CargoStatus' }
+        location:
+          type: string
+          maxLength: 200
+          description: Where the change happened; defaults to the vessel's current location.
+        note: { type: string, maxLength: 1000 }
+
+    RecordMovementRequest:
+      type: object
+      additionalProperties: false
+      required: [location]
+      properties:
+        location: { type: string, minLength: 1, maxLength: 200 }
+        note: { type: string, maxLength: 1000 }
+
+    Vessel:
+      type: object
+      additionalProperties: false
+      required: [id, name, capacity_kg, current_location, load_kg, available_capacity_kg, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        capacity_kg: { type: number }
+        current_location: { type: string }
+        load_kg:
+          type: number
+          description: Weight of cargo on board that is not delivered yet
+        available_capacity_kg: { type: number }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    Cargo:
+      type: object
+      additionalProperties: false
+      required: [id, name, description, weight_kg, status, vessel_id, version, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        description: { type: string }
+        weight_kg: { type: number }
+        status: { $ref: '#/components/schemas/CargoStatus' }
+        vessel_id: { type: string, format: uuid }
+        version: { type: integer, minimum: 1 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    TrackingEntry:
+      type: object
+      additionalProperties: false
+      required: [id, cargo_id, status, location, recorded_at]
+      properties:
+        id: { type: string, format: uuid }
+        cargo_id: { type: string, format: uuid }
+        status: { $ref: '#/components/schemas/CargoStatus' }
+        location: { type: string }
+        note: { type: string }
+        recorded_at: { type: string, format: date-time }
+
+    CargoEvent:
+      type: object
+      additionalProperties: false
+      required: [event_id, cargo_id, old_status, new_status, occurred_at, received_at]
+      properties:
+        event_id: { type: string, format: uuid }
+        cargo_id: { type: string, format: uuid }
+        old_status: { $ref: '#/components/schemas/CargoStatus' }
+        new_status: { $ref: '#/components/schemas/CargoStatus' }
+        occurred_at: { type: string, format: date-time }
+        received_at: { type: string, format: date-time }
+
+    PageMeta:
+      type: object
+      additionalProperties: false
+      required: [limit, offset, count]
+      properties:
+        limit: { type: integer }
+        offset: { type: integer }
+        count: { type: integer }
+
+    VesselEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data]
+      properties:
+        data: { $ref: '#/components/schemas/Vessel' }
+
+    VesselPage:
+      type: object
+      additionalProperties: false
+      required: [data, meta]
+      properties:
+        data: { type: array, items: { $ref: '#/components/schemas/Vessel' } }
+        meta: { $ref: '#/components/schemas/PageMeta' }
+
+    CargoEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data]
+      properties:
+        data: { $ref: '#/components/schemas/Cargo' }
+
+    CargoPage:
+      type: object
+      additionalProperties: false
+      required: [data, meta]
+      properties:
+        data: { type: array, items: { $ref: '#/components/schemas/Cargo' } }
+        meta: { $ref: '#/components/schemas/PageMeta' }
+
+    TrackingEntryEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data]
+      properties:
+        data: { $ref: '#/components/schemas/TrackingEntry' }
+
+    TrackingEntryList:
+      type: object
+      additionalProperties: false
+      required: [data]
+      properties:
+        data: { type: array, items: { $ref: '#/components/schemas/TrackingEntry' } }
+
+    CargoEventList:
+      type: object
+      additionalProperties: false
+      required: [data]
+      properties:
+        data: { type: array, items: { $ref: '#/components/schemas/CargoEvent' } }
+
+    ErrorEnvelope:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum:
+                - bad_request
+                - unsupported_media_type
+                - payload_too_large
+                - route_not_found
+                - method_not_allowed
+                - validation_failed
+                - not_found
+                - already_exists
+                - invalid_status_transition
+                - vessel_capacity_exceeded
+                - cargo_already_delivered
+                - version_mismatch
+                - idempotency_key_reused
+                - service_unavailable
+                - internal_error
+            message: { type: string }
+            details:
+              type: object
+              description: Field name → reason, for validation errors
+              additionalProperties: { type: string }
+
+    Readiness:
+      type: object
+      additionalProperties: false
+      required: [status, checks]
+      properties:
+        status: { type: string, enum: [ready, degraded, unavailable] }
+        checks:
+          type: object
+          additionalProperties: { type: string, enum: [up, down] }

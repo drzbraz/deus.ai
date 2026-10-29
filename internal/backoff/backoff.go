@@ -30,7 +30,7 @@ func (e Exponential) Delay(attempt int) time.Duration {
 	if ceiling <= 0 {
 		return 0
 	}
-	return time.Duration(rand.Int64N(int64(ceiling))) + 1
+	return time.Duration(rand.Int64N(int64(ceiling))) + 1 //nolint:gosec // jitter, not security: no need for crypto/rand
 }
 
 func (e Exponential) ceiling(attempt int) time.Duration {
