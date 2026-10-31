@@ -17,9 +17,12 @@ type Cargo struct {
 	Status      Status
 	VesselID    uuid.UUID
 	// Version increases on every change and backs optimistic concurrency (ETag/If-Match).
-	Version   int
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	Version int
+	// CurrentLocation is where the cargo was last recorded (its latest
+	// tracking entry). It is derived on read and never stored.
+	CurrentLocation string
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
 }
 
 // NewCargoParams groups the client-provided fields of a new cargo.

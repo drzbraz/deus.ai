@@ -24,12 +24,14 @@ The suites build with the `e2e` tag. Point them elsewhere with `API_BASE_URL`, `
 - field validation table, all errors reported at once, boundary values (200 chars, 0.01 kg, 1e9 kg, unicode)
 - 404 / invalid ids, stable and disjoint pagination, `meta`, `[]` for empty pages, bad pagination → 400/422
 - moving a vessel: timestamps, validation, immutability of name, history not rewritten, load excludes delivered cargo
+- in-transit cargo moves with its vessel (pending and delivered cargo does not); a move without cargo still succeeds
 
 **Cargoes** (`e2e/cargoes_test.go`)
 - created `pending` with version 1 and `ETag`, first tracking entry at the vessel's location, no event on creation
 - clients cannot set `status`, `version` or `id`; full validation table; wrong JSON types
 - capacity: exact fit, 0.01 kg over, in-transit still counts, delivery frees space, single cargo heavier than vessel
 - filters (`status`, `vessel_id`, combined, pagination), bad filters, unknown query params ignored
+- `current_location` follows the latest tracking entry (creation, movement, status change, vessel move), in list and detail
 
 **Status lifecycle** (`e2e/status_lifecycle_test.go`)
 - happy path with versions, ETags, locations, notes and both events
@@ -51,7 +53,7 @@ The suites build with the `e2e` tag. Point them elsewhere with `API_BASE_URL`, `
 - 20 racing identical transitions → 1 winner, 1 tracking entry, 1 outbox row, 1 event
 - mixed racing transitions keep history a valid prefix of the lifecycle
 - 25 concurrent 10 kg cargoes on a 100 kg vessel → exactly 10 accepted; mixed weights never exceed capacity
-- movements racing delivery never land after it; `If-Match` race → 1×200 + 14×412; vessel-name race → 1×201
+- movements and vessel moves racing delivery never land after it; `If-Match` race → 1×200 + 14×412; vessel-name race → 1×201
 - 25 simultaneous POSTs with one key → 1 cargo, identical responses; 20 simultaneous status PATCHes with one key → 1 event
 - same key with two different bodies at once → one cargo, twins replayed, others 422
 - readers never see a torn state (status and version always agree); independent cargoes do not block each other

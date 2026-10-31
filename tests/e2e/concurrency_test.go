@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"fmt"
 	"net/http"
 	"testing"
 
@@ -92,6 +93,22 @@ func TestConcurrency_MovementsRacingDeliveryNeverFollowIt(t *testing.T) {
 	history := c.History(cargo.ID)
 	assert.Equal(t, Delivered, history[len(history)-1].Status, "nothing is recorded after delivery")
 	assert.Len(t, history, 2+counts[http.StatusCreated]+1)
+}
+
+func TestConcurrency_VesselMovesRacingDeliveryNeverFollowIt(t *testing.T) {
+	c := api(t)
+	cargo := c.NewCargoInStatus(InTransit)
+
+	responses := Parallel(11, func(i int) Response {
+		if i == 5 {
+			return c.ChangeStatus(cargo.ID, Delivered)
+		}
+		return c.Patch(VesselPath(cargo.VesselID)+"/location", map[string]any{"current_location": fmt.Sprintf("waypoint-%d", i)})
+	})
+
+	assert.Equal(t, map[int]int{http.StatusOK: 11}, StatusCounts(responses), "moving a ship never fails because of its cargo")
+	history := c.History(cargo.ID)
+	assert.Equal(t, Delivered, history[len(history)-1].Status, "no movement is recorded after delivery")
 }
 
 func TestConcurrency_OptimisticLockingRace(t *testing.T) {

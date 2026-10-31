@@ -20,7 +20,7 @@ services:
       retries: 30
 
   rabbitmq-test:
-    image: rabbitmq:management
+    image: rabbitmq:4.4-management
     environment:
       RABBITMQ_DEFAULT_USER: deus_user
       RABBITMQ_DEFAULT_PASS: deus_pass

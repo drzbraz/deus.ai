@@ -96,7 +96,10 @@ paths:
     patch:
       tags: [Vessels]
       summary: Move a vessel
-      description: Existing tracking history is not affected.
+      description: |
+        Every `in_transit` cargo on board gets a tracking entry at the new
+        location (note `moved with vessel`), in the same transaction. Pending
+        and delivered cargo is not moved, and existing history is never changed.
       operationId: updateVesselLocation
       requestBody:
         required: true
@@ -502,7 +505,7 @@ components:
     Cargo:
       type: object
       additionalProperties: false
-      required: [id, name, description, weight_kg, status, vessel_id, version, created_at, updated_at]
+      required: [id, name, description, weight_kg, status, vessel_id, current_location, version, created_at, updated_at]
       properties:
         id: { type: string, format: uuid }
         name: { type: string }
@@ -510,6 +513,10 @@ components:
         weight_kg: { type: number }
         status: { $ref: '#/components/schemas/CargoStatus' }
         vessel_id: { type: string, format: uuid }
+        current_location:
+          type: string
+          description: Location of the latest tracking entry
+        
         version: { type: integer, minimum: 1 }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }

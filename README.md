@@ -1,5 +1,7 @@
 # Logistics API — DEUS Go Backend Challenge
 
+[![CI](https://github.com/drzbraz/deus.ai/actions/workflows/ci.yml/badge.svg)](https://github.com/drzbraz/deus.ai/actions/workflows/ci.yml)
+
 A Go REST API that tracks **cargoes**, the **vessels** that carry them and the **movement history** of every cargo.
 It includes the bonus **event-driven pipeline**: each cargo status change is published to RabbitMQ and stored by a background consumer.
 On top of that it has **OpenTelemetry observability**: per-endpoint latency metrics and distributed traces, with a Grafana dashboard ready to use.
@@ -14,6 +16,40 @@ On top of that it has **OpenTelemetry observability**: per-endpoint latency metr
 
 ---
 
+## Reviewer's guide (5 minutes)
+
+**Run it.** Docker is the only requirement:
+
+```bash
+make docker-run     # API on http://localhost:8080, plus Postgres, RabbitMQ, Grafana, Jaeger
+make demo           # guided 12-step tour: lifecycle, idempotent retry, 409/412/422, vessel moves, events
+make test-docker    # the whole test suite inside Docker (no local Go needed)
+```
+
+Then open **http://localhost:8080/docs** (Swagger UI) or the **Grafana "Logistics API" dashboard** at http://localhost:3000.
+
+**Required vs. extra.**
+
+| Challenge requirement | Where it is |
+|---|---|
+| Cargo create / retrieve / update status, vessel details, tracking history | [API documentation](#api-documentation), `internal/transport/httpapi` |
+| Clean architecture, interfaces, error wrapping, structured logs | `internal/{domain,service,repository,transport}`, zap |
+| Postgres model, relationships, indexes, migrations, auditability | `migrations/` (append-only history is enforced by DB triggers) |
+| Unit + integration tests, docker-compose test env, 80%+ coverage | [Testing](#testing): 94% |
+| Dockerfile, docker-compose, `make docker-run`, port 8080 | root |
+| **Bonus:** status events → RabbitMQ → consumer → `cargo_events` | [Event pipeline](#event-pipeline-bonus) |
+
+Beyond the challenge: transactional outbox (no lost events), idempotency keys and optimistic locking (safe retries and races), OpenTelemetry metrics and traces with a Grafana dashboard, OpenAPI contract + Swagger UI, black-box e2e / fault-injection / schema suites, and CI (lint, vulnerability scan, every suite, Docker stack test).
+
+**Five files that carry the design:**
+1. `internal/domain/status.go`: the forward-only state machine, as one table
+2. `internal/service/cargo_service.go`: `UpdateStatus` locks the cargo, then commits the status, history and event atomically
+3. `internal/repository/postgres/db.go`: Unit of Work (transaction carried in `ctx`) and DB error translation
+4. `internal/events/relay.go` + `handler.go`: outbox → RabbitMQ → idempotent consumer
+5. `internal/transport/httpapi/idempotency.go`: concurrent duplicate requests serialised by the database
+
+---
+
 ## Contents
 
 1. [Quick start (Docker)](#quick-start-docker)
@@ -24,13 +60,16 @@ On top of that it has **OpenTelemetry observability**: per-endpoint latency metr
 6. [Testing](#testing)
 7. [Design decisions](#design-decisions)
 8. [Resilience and edge cases](#resilience-and-edge-cases)
-9. [Project layout](#project-layout)
+9. [Known limitations and next steps](#known-limitations-and-next-steps)
+10. [Project layout](#project-layout)
 
 ---
 
 ## Quick start (Docker)
 
 Requirements: Docker with Compose v2 and `make`.
+
+> Local (non-Docker) runs need **Go 1.26+** (pinned to 1.26.10 in `go.mod` for its security fixes; the challenge asks for 1.21+). An older Go downloads the right toolchain automatically unless `GOTOOLCHAIN=local` is set. The Docker targets need no local Go at all.
 
 ```bash
 make docker-run      # builds the API image and starts the whole stack
@@ -84,6 +123,7 @@ Configuration comes from environment variables. The defaults work with `make dep
 | `SHUTDOWN_TIMEOUT` | `15s` | time allowed to drain in-flight requests |
 | `DB_MAX_CONNS` / `DB_STATEMENT_TIMEOUT` / `DB_CONNECT_ATTEMPTS` | `20` / `5s` / `10` | pool size, server-side query limit, startup retries |
 | `RELAY_ENABLED` / `CONSUMER_ENABLED` | `true` / `true` | run the outbox relay / event consumer in this process |
+| `CONSUMER_WORKERS` | `4` | events stored in parallel (one cargo's events always stay in order) |
 | `OUTBOX_POLL_INTERVAL` / `OUTBOX_BATCH_SIZE` | `500ms` / `100` | relay tuning |
 | `IDEMPOTENCY_TTL` | `24h` | how long `Idempotency-Key` responses are kept |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | *(empty = telemetry off)* | e.g. `http://localhost:4317` |
@@ -149,6 +189,8 @@ PATCH /api/v1/vessels/{id}/location
 { "current_location": "Singapore" }
 ```
 
+Cargo travels with its vessel. In the same transaction, every `in_transit` cargo on board gets a tracking entry at the new location (note `moved with vessel`). Pending cargo has not left port and delivered cargo has been unloaded, so neither moves. Existing history is never changed.
+
 ### Cargoes
 
 ```http
@@ -160,12 +202,14 @@ Idempotency-Key: 7f1c2c1e-order-42          (optional)
 201 Created
 ETag: "1"
 { "data": { "id": "01a18920-e309-71a7-aef3-9989b6091bfb", "name": "Coffee beans", "description": "Arabica",
-            "weight_kg": 1200, "status": "pending", "vessel_id": "01a18920-e2a7-...", "version": 1,
+            "weight_kg": 1200, "status": "pending", "vessel_id": "01a18920-e2a7-...",
+            "current_location": "Rotterdam", "version": 1,
             "created_at": "...", "updated_at": "..." } }
 ```
 
 - New cargo always starts as `pending`. Clients cannot choose the initial status.
 - Creation records the first tracking entry at the vessel's current location.
+- `current_location` is where the cargo was last recorded (its latest tracking entry). It is derived on read, never stored, so it cannot drift from the history.
 - `409 vessel_capacity_exceeded` if the cargo does not fit on the vessel. `422` if `vessel_id` does not exist.
 
 ### Status changes
@@ -263,7 +307,7 @@ Event payload (routing key `cargo.status_changed`):
 
 - **Transactional outbox.** The event is written in the same transaction as the status change. An event exists if and only if the change was committed, even if the process crashes or RabbitMQ is down.
 - **Relay.** Claims pending rows with `FOR UPDATE SKIP LOCKED`, so several API replicas can run it safely. It publishes with **publisher confirms** and marks a row published only after the broker acknowledges it. It stops a batch at the first failure to keep events in order, then backs off exponentially with jitter.
-- **Consumer.** Uses manual acks and prefetch 10. It stores each event **idempotently** (`cargo_events.id` = `event_id`), so redeliveries are harmless.
+- **Consumer.** Stores events on `CONSUMER_WORKERS` goroutines. The publisher puts the cargo id in an AMQP header, and the consumer always sends a given cargo to the same worker, so **different cargoes are processed in parallel while each cargo's events keep their order** within a consumer instance. (With several API replicas consuming, RabbitMQ spreads messages across them; storage stays correct because inserts are idempotent and reads sort by `occurred_at`. Strict cross-replica ordering would need the queue's single-active-consumer mode.) Uses manual acks, and prefetch is 5 per worker for backpressure. It stores each event **idempotently** (`cargo_events.id` = `event_id`), so redeliveries are harmless.
   - Malformed messages, or events for unknown cargo, are rejected to the **DLQ**.
   - While Postgres is down it retries the same message instead of requeueing it, so an outage cannot push healthy messages into the DLQ.
   - The quorum queue's `x-delivery-limit` dead-letters a message that keeps crashing the worker.
@@ -343,6 +387,8 @@ Besides the unit and integration tests next to the code, [`tests/`](tests/README
 | Two relays never publish the same row | `TestOutbox_SkipLockedSplitsWorkBetweenRelays` |
 | History cannot be modified (UPDATE/DELETE/TRUNCATE) | `TestAuditTables_AreAppendOnly` |
 | Graceful shutdown drains in-flight requests | `TestServe_DrainsInFlightRequestsOnShutdown` |
+| Consumer runs cargoes in parallel, never reorders one cargo | `TestConsumer_ParallelAcrossCargoesOrderedWithinCargo`, `TestShardedPool_PreservesOrderPerKey` |
+| Readiness checks run concurrently (probe time = slowest check) | `TestReadiness_ChecksRunConcurrently` |
 | Latency metric uses route patterns, not ids | `TestLatencyMetricUsesRoutePattern` |
 
 ### Continuous integration
@@ -415,11 +461,21 @@ idempotency_keys  (stored responses for Idempotency-Key)
 | Panic in a handler | recovered: JSON 500, stack trace logged with the trace id |
 | Invalid input | unknown fields, trailing JSON, wrong types, empty or oversized body, wrong content type, bad UUIDs, out-of-range pagination: each gets a specific 4xx before reaching business code |
 
-**Trade-offs / next steps.** Offset pagination is simple but drifts on large tables; keyset pagination over `(created_at, id)` would fix that, and the index already exists. There is no authentication, since the spec does not ask for it. In production the relay and consumer would usually run as separate deployments; the env flags already allow it.
+## Known limitations and next steps
+
+- **Relay ordering is global.** The outbox relay publishes in creation order and stops a batch at the first failure. That is correct when RabbitMQ is down (everything waits and nothing is lost), but a failure specific to *one* message would hold back every cargo's events until it succeeds. Next step: publish per cargo (only the oldest pending event of each cargo is eligible), back off per message, and park a message after N attempts behind an `outbox.parked` metric and alert.
+- **Ordering across replicas.** The consumer keeps each cargo's events in order within one instance. With several API replicas, RabbitMQ spreads messages between them. Storage stays correct (idempotent inserts, reads sorted by `occurred_at`); strict cross-replica order would need the queue's single-active-consumer mode.
+- **Offset pagination** is simple but drifts on large, changing tables; keyset pagination over `(created_at, id)` would fix that, and the index already exists.
+- **No authentication**, since the challenge does not ask for it; an API key or JWT middleware would slot into the existing middleware chain.
+- **Swagger UI loads its assets from a CDN** (unpkg), so `/docs` needs internet access. `/openapi.yaml` is served from the binary.
+- **Deployment shape.** The relay and consumer run inside the API process for simplicity; `RELAY_ENABLED` / `CONSUMER_ENABLED` already allow running them as separate deployments.
 
 ## Project layout
 
 ```
+.github/workflows/ci.yml     CI: lint, vulnerability scan, every test suite, Docker stack test
+.golangci.yml                linter configuration
+api/openapi.yaml             OpenAPI 3 contract (embedded; served at /openapi.yaml and /docs)
 cmd/api/                     entry point (config, logger, signals)
 internal/
   app/                       composition root, lifecycle, graceful shutdown
@@ -436,4 +492,6 @@ internal/
   logger/                    zap setup + trace/request correlation
 migrations/                  SQL migrations (embedded)
 deploy/                      otel-collector, prometheus, grafana (datasources + dashboard)
+scripts/demo.sh              guided API tour (`make demo`)
+tests/                       black-box suites: e2e, resilience, schema (+ testkit harness)
 ```

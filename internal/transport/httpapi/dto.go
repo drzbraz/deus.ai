@@ -57,9 +57,11 @@ type cargoResponse struct {
 	WeightKg    float64   `json:"weight_kg"`
 	Status      string    `json:"status"`
 	VesselID    uuid.UUID `json:"vessel_id"`
-	Version     int       `json:"version"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	// CurrentLocation is where the cargo was last recorded.
+	CurrentLocation string    `json:"current_location"`
+	Version         int       `json:"version"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 type trackingEntryResponse struct {
@@ -95,15 +97,16 @@ func toVesselResponse(v domain.Vessel) vesselResponse {
 
 func toCargoResponse(c domain.Cargo) cargoResponse {
 	return cargoResponse{
-		ID:          c.ID,
-		Name:        c.Name,
-		Description: c.Description,
-		WeightKg:    c.WeightKg,
-		Status:      string(c.Status),
-		VesselID:    c.VesselID,
-		Version:     c.Version,
-		CreatedAt:   c.CreatedAt,
-		UpdatedAt:   c.UpdatedAt,
+		ID:              c.ID,
+		Name:            c.Name,
+		Description:     c.Description,
+		WeightKg:        c.WeightKg,
+		Status:          string(c.Status),
+		VesselID:        c.VesselID,
+		CurrentLocation: c.CurrentLocation,
+		Version:         c.Version,
+		CreatedAt:       c.CreatedAt,
+		UpdatedAt:       c.UpdatedAt,
 	}
 }
 

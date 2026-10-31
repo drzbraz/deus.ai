@@ -65,7 +65,7 @@ jobs:
           --health-cmd "pg_isready -U deus -d logistics_test"
           --health-interval 2s --health-timeout 3s --health-retries 30
       rabbitmq:
-        image: rabbitmq:management
+        image: rabbitmq:4.4-management
         env:
           RABBITMQ_DEFAULT_USER: deus_user
           RABBITMQ_DEFAULT_PASS: deus_pass

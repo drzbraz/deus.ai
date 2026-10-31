@@ -24,15 +24,16 @@ type Vessel struct {
 }
 
 type Cargo struct {
-	ID          string    `json:"id"`
-	Name        string    `json:"name"`
-	Description string    `json:"description"`
-	WeightKg    float64   `json:"weight_kg"`
-	Status      string    `json:"status"`
-	VesselID    string    `json:"vessel_id"`
-	Version     int       `json:"version"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID              string    `json:"id"`
+	Name            string    `json:"name"`
+	Description     string    `json:"description"`
+	WeightKg        float64   `json:"weight_kg"`
+	Status          string    `json:"status"`
+	VesselID        string    `json:"vessel_id"`
+	CurrentLocation string    `json:"current_location"`
+	Version         int       `json:"version"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 type TrackingEntry struct {

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -111,6 +112,34 @@ func TestReadiness(t *testing.T) {
 			assert.JSONEq(t, tt.wantBody, rec.Body.String())
 		})
 	}
+}
+
+// Regression: readiness checks run concurrently. Each check waits until all
+// of them have started, which can only happen if they overlap; a sequential
+// probe would time out on the first check.
+func TestReadiness_ChecksRunConcurrently(t *testing.T) {
+	const checks = 3
+	var started sync.WaitGroup
+	started.Add(checks)
+	allStarted := make(chan struct{})
+	go func() { started.Wait(); close(allStarted) }()
+
+	barrier := func(ctx context.Context) error {
+		started.Done()
+		select {
+		case <-allStarted:
+			return nil
+		case <-time.After(time.Second):
+			return errors.New("checks did not overlap")
+		}
+	}
+	s := newTestServer()
+	s.checks = []httpapi.HealthCheck{{"postgres", true, barrier}, {"rabbitmq", false, barrier}, {"cache", false, barrier}}
+
+	rec := s.do(t, http.MethodGet, "/readyz", "")
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.JSONEq(t, `{"status":"ready","checks":{"postgres":"up","rabbitmq":"up","cache":"up"}}`, rec.Body.String())
 }
 
 // Regression: latency metrics must be labelled with the route pattern, never

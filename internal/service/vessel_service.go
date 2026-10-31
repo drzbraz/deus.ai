@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -53,6 +54,8 @@ func (s *VesselService) List(ctx context.Context, page domain.Page) ([]domain.Ve
 	return vessels, nil
 }
 
+// UpdateLocation moves a vessel and, in the same transaction, records the
+// new position in the history of every cargo travelling on it.
 func (s *VesselService) UpdateLocation(ctx context.Context, id uuid.UUID, location string) (domain.Vessel, error) {
 	var updated domain.Vessel
 
@@ -61,10 +64,14 @@ func (s *VesselService) UpdateLocation(ctx context.Context, id uuid.UUID, locati
 		if err != nil {
 			return err
 		}
-		if err := vessel.MoveTo(location, s.now()); err != nil {
+		now := s.now()
+		if err := vessel.MoveTo(location, now); err != nil {
 			return err
 		}
 		if err := s.repos.Vessels.Update(ctx, vessel); err != nil {
+			return err
+		}
+		if err := s.moveCargoAboard(ctx, vessel, now); err != nil {
 			return err
 		}
 		updated = vessel
@@ -74,4 +81,25 @@ func (s *VesselService) UpdateLocation(ctx context.Context, id uuid.UUID, locati
 		return domain.Vessel{}, fmt.Errorf("update vessel %s location: %w", id, err)
 	}
 	return updated, nil
+}
+
+// moveCargoAboard appends a movement for each in-transit cargo on the vessel.
+// Pending cargo has not left port and delivered cargo has been unloaded, so
+// only in-transit cargo travels with the ship. The cargoes are locked, so a
+// delivery committed at the same moment is never followed by a movement.
+func (s *VesselService) moveCargoAboard(ctx context.Context, vessel domain.Vessel, now time.Time) error {
+	cargoes, err := s.repos.Cargoes.ListForUpdateByVessel(ctx, vessel.ID, domain.StatusInTransit)
+	if err != nil {
+		return err
+	}
+	for _, cargo := range cargoes {
+		entry, err := domain.NewTrackingEntry(cargo, vessel.CurrentLocation, NoteMovedWithVessel, now)
+		if err != nil {
+			return err
+		}
+		if err := s.repos.Tracking.Append(ctx, entry); err != nil {
+			return err
+		}
+	}
+	return nil
 }

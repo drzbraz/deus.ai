@@ -141,3 +141,51 @@ func TestTrackingService_Events(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, events, 1)
 }
+
+// Regression: cargo travels with its vessel, so moving the ship records a
+// movement for every in-transit cargo on board, and only for those.
+func TestVesselService_MovingRecordsMovementsForCargoInTransit(t *testing.T) {
+	f := newCargoFixture(t, 1000)
+	pending := f.createCargo(t, 1)
+	moving := f.createCargo(t, 1)
+	delivered := f.createCargo(t, 1)
+	advance(t, f, moving.ID, domain.StatusInTransit)
+	advance(t, f, delivered.ID, domain.StatusInTransit, domain.StatusDelivered)
+	before := len(f.store.tracking)
+
+	_, err := f.vessels.UpdateLocation(context.Background(), f.vessel.ID, "Port Said")
+
+	require.NoError(t, err)
+	added := f.store.tracking[before:]
+	require.Len(t, added, 1, "only the in-transit cargo moves")
+	assert.Equal(t, moving.ID, added[0].CargoID)
+	assert.Equal(t, "Port Said", added[0].Location)
+	assert.Equal(t, domain.StatusInTransit, added[0].Status)
+	assert.Equal(t, service.NoteMovedWithVessel, added[0].Note)
+	assert.Equal(t, fixedNow, added[0].RecordedAt)
+
+	got, err := f.svc.Get(context.Background(), moving.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "Port Said", got.CurrentLocation)
+	got, err = f.svc.Get(context.Background(), pending.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "Rotterdam", got.CurrentLocation, "pending cargo stays in port")
+}
+
+func TestVesselService_MoveRollsBackWhenCargoMovementFails(t *testing.T) {
+	f := newCargoFixture(t, 1000)
+	moving := f.createCargo(t, 1)
+	advance(t, f, moving.ID, domain.StatusInTransit)
+	before := len(f.store.tracking)
+
+	for _, op := range []string{"cargoes.lock_by_vessel", "tracking.append"} {
+		f.store.failures[op] = domain.ErrUnavailable
+
+		_, err := f.vessels.UpdateLocation(context.Background(), f.vessel.ID, "Port Said")
+
+		assert.ErrorIs(t, err, domain.ErrUnavailable, op)
+		assert.Equal(t, "Rotterdam", f.store.vessels[f.vessel.ID].CurrentLocation, "the vessel does not move alone")
+		assert.Len(t, f.store.tracking, before)
+		delete(f.store.failures, op)
+	}
+}

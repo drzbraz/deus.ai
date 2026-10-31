@@ -24,6 +24,7 @@ type Config struct {
 	RabbitMQURL     string
 	RelayEnabled    bool
 	ConsumerEnabled bool
+	ConsumerWorkers int
 	OutboxInterval  time.Duration
 	OutboxBatchSize int
 
@@ -51,6 +52,7 @@ func Load() (Config, error) {
 		RabbitMQURL:     r.string("RABBITMQ_URL", "amqp://deus_user:deus_pass@localhost:5672/"),
 		RelayEnabled:    r.bool("RELAY_ENABLED", true),
 		ConsumerEnabled: r.bool("CONSUMER_ENABLED", true),
+		ConsumerWorkers: r.int("CONSUMER_WORKERS", 4),
 		OutboxInterval:  r.duration("OUTBOX_POLL_INTERVAL", 500*time.Millisecond),
 		OutboxBatchSize: r.int("OUTBOX_BATCH_SIZE", 100),
 

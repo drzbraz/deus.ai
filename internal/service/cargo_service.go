@@ -10,6 +10,12 @@ import (
 	"github.com/drzbraz/deus.ai/internal/domain"
 )
 
+// Notes written by the system on tracking entries it creates itself.
+const (
+	NoteCargoRegistered = "cargo registered"
+	NoteMovedWithVessel = "moved with vessel"
+)
+
 // CargoService manages cargo creation, lookup and the status lifecycle.
 type CargoService struct {
 	repos   Repositories
@@ -47,13 +53,14 @@ func (s *CargoService) Create(ctx context.Context, in CreateCargoInput) (domain.
 				domain.ErrCapacityExceeded, vessel.ID, vessel.CapacityKg-vessel.LoadKg, cargo.WeightKg)
 		}
 
-		entry, err := domain.NewTrackingEntry(cargo, vessel.CurrentLocation, "cargo registered", now)
+		entry, err := domain.NewTrackingEntry(cargo, vessel.CurrentLocation, NoteCargoRegistered, now)
 		if err != nil {
 			return err
 		}
 		if err := s.repos.Cargoes.Create(ctx, cargo); err != nil {
 			return err
 		}
+		cargo.CurrentLocation = entry.Location
 		return s.repos.Tracking.Append(ctx, entry)
 	})
 	if err != nil {
@@ -141,6 +148,7 @@ func (s *CargoService) UpdateStatus(ctx context.Context, in UpdateStatusInput) (
 			return err
 		}
 
+		cargo.CurrentLocation = entry.Location
 		updated = cargo
 		return nil
 	})
