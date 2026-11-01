@@ -401,8 +401,7 @@ Besides the unit and integration tests next to the code, [`tests/`](tests/README
 |---|---|
 | Lint | golangci-lint v2 with the project config (`.golangci.yml`) |
 | Vulnerability scan | `govulncheck`: fails if our code reaches a known vulnerable function |
-| Unit tests | `make test` with the race detector |
-| Integration, e2e, resilience & schema | Postgres and RabbitMQ as service containers; every suite with `-race`; **fails under 80% coverage**; coverage report uploaded as an artifact |
+| Tests | Postgres and RabbitMQ as service containers; every suite (unit, integration, e2e, resilience, schema) with `-race`; **fails under 80% coverage**; coverage report uploaded as an artifact |
 | Docker stack + black-box e2e | builds the image, boots the full `docker-compose` stack, runs the e2e and schema suites against it over HTTP |
 | SonarQube Cloud | imports the coverage and golangci-lint reports and applies the quality gate; results are public on the [dashboard](https://sonarcloud.io/project/overview?id=drzbraz_deus.ai) and posted on each pull request |
 
