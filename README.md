@@ -14,36 +14,138 @@ On top of that it has **OpenTelemetry observability**: per-endpoint latency metr
 | Storage | PostgreSQL 16 via `pgx/v5`, raw SQL, `golang-migrate` migrations embedded in the binary |
 | Messaging | RabbitMQ (quorum queues, publisher confirms, dead-letter queue) |
 | Observability | OpenTelemetry → Collector → Jaeger (traces) + Prometheus (metrics) → Grafana |
-| Tests | unit + integration + black-box e2e/resilience/schema suites (~430 cases), **94% combined coverage**, race detector on |
+| Tests | unit, integration and black-box e2e / resilience / schema suites (267 test functions), **94–95% coverage**, race detector on |
 
 ---
 
-## Reviewer's guide (5 minutes)
+## Interviewer's guide
 
-**Run it.** Docker is the only requirement:
+Everything below maps the [challenge brief](#requirements-checklist) item by item to where it is implemented and how to check it. **Every requirement and the full bonus are delivered.**
+
+### Run it (Docker is the only requirement)
 
 ```bash
-make docker-run     # API on http://localhost:8080, plus Postgres, RabbitMQ, Grafana, Jaeger
-make demo           # guided 12-step tour: lifecycle, idempotent retry, 409/412/422, vessel moves, events
-make test-docker    # the whole test suite inside Docker (no local Go needed)
+make docker-run   # builds the API image, starts API + Postgres + RabbitMQ + observability; API on http://localhost:8080
+make demo         # guided 12-step tour of the API; every step asserts its HTTP status
+make test-docker  # the whole test suite inside Docker (no local Go needed)
 ```
 
-Then open **http://localhost:8080/docs** (Swagger UI) or the **Grafana "Logistics API" dashboard** at http://localhost:3000.
+Then open **http://localhost:8080/docs** to try the API in Swagger UI. `make docker-down` stops everything.
 
-**Required vs. extra.**
+### Requirements checklist
 
-| Challenge requirement | Where it is |
+✅ = delivered. Paths are relative to the repository root; test names can be found with `grep -rn <name>`.
+
+**Technical information**
+
+| Requirement | ✓ | Where | How to verify |
+|---|---|---|---|
+| Go 1.21+, Go modules | ✅ | `go.mod` (Go 1.26, toolchain pinned to the patched 1.26.10) | `make build` |
+| Clean, modular architecture (handlers, services, repositories, models) | ✅ | `internal/transport/httpapi` → `internal/service` → `internal/repository/postgres`, models in `internal/domain` | [Design decisions](#design-decisions) |
+| Go best practices: interfaces, error wrapping, idiomatic style | ✅ | ports declared by consumers (`internal/service/ports.go`); errors wrapped with `%w` at each layer | `make lint`: golangci-lint (incl. errorlint, wrapcheck), 0 issues; SonarQube Cloud A ratings |
+| Structured logging | ✅ | zap, JSON, with `request_id` / `trace_id` / `span_id` (`internal/logger`) | `make docker-logs` |
+| Errors handled gracefully, meaningful messages, proper HTTP codes | ✅ | one mapping table, one JSON error shape (`internal/transport/httpapi/response.go`) | [Error codes](#error-codes); `TestErrorMapping`, `TestContract_ErrorsNeverLeakInternals` |
+| Dockerfile + docker-compose.yml | ✅ | `Dockerfile` (multi-stage, distroless, non-root), `docker-compose.yml` | `make docker-run` |
+
+**Clients should be able to**
+
+| Requirement | ✓ | Endpoint | How to verify |
+|---|---|---|---|
+| Create, retrieve and update cargo status (`pending`, `in_transit`, `delivered`) | ✅ | `POST /cargoes`, `GET /cargoes[/{id}]`, `PATCH /cargoes/{id}/status` | `make demo` steps 2–10; `TestStatus_HappyPathThroughTheWholeLifecycle`, `TestStatus_TransitionMatrix` |
+| Retrieve vessel details: name, capacity, current location | ✅ | `GET /vessels/{id}` (also `load_kg`, `available_capacity_kg`) | `TestVessel_CreateReturnsResourceAndLocation` |
+| Complete movement history for each cargo | ✅ | `GET /cargoes/{id}/tracking` | `make demo` step 11; `TestTracking_FullHistoryIsCompleteAndChronological` |
+
+**Data model**
+
+| Requirement | ✓ | Where | How to verify |
+|---|---|---|---|
+| PostgreSQL | ✅ | PostgreSQL 16, `pgx/v5` | `docker-compose.yml` |
+| Relationships between cargoes, vessels and tracking | ✅ | foreign keys `cargoes.vessel_id`, `tracking_entries.cargo_id`, `cargo_events.cargo_id` (`ON DELETE RESTRICT`) | `TestSchema_ReferencedRowsCannotBeDeleted` |
+| Data integrity, indexing, normalization | ✅ | `CHECK` / `NOT NULL` / `UNIQUE` constraints, a status enum, indexes matching every query | `TestSchema_CargoConstraints`, `TestSchema_ExpectedIndexesExist` |
+| DB migrations | ✅ | raw SQL with golang-migrate, embedded in the binary, applied at startup (`migrations/`) | `TestMigrations_RoundTripDownAndUp` (up → down → up on a fresh database) |
+
+**Part 1: API development**
+
+| Requirement | ✓ | Where | How to verify |
+|---|---|---|---|
+| RESTful API | ✅ | resources under `/api/v1`, correct verbs and codes, `Location` / `ETag` headers | [Endpoints](#endpoints); Swagger UI at `/docs` |
+| Endpoints support the required operations | ✅ | create / retrieve / update status / history. There is **no DELETE**: history must never be erased (auditability), so `DELETE` returns 405 | `TestContract_UnknownRoutesAndMethods` |
+| Input validation | ✅ | field-level validation in the domain; strict JSON decoding (unknown fields, trailing data, size, content type) | `TestCargo_Validation`, `TestContract_MalformedBodiesOnEveryWriteEndpoint` (12 cases × 5 endpoints) |
+| Consistent JSON responses | ✅ | `{"data": …}` / `{"error": {code, message, details}}`, checked against the [OpenAPI contract](api/openapi.yaml) on **every** response in the black-box suite | `TestContract_EveryResponseIsJSONWithAConsistentEnvelope` |
+
+**Part 2: Database & persistence**
+
+| Requirement | ✓ | Where | How to verify |
+|---|---|---|---|
+| Repository / data access layer | ✅ | `internal/repository/postgres`, with a Unit of Work (`TxManager.WithinTx`) | integration tests in that package |
+| A cargo belongs to a vessel | ✅ | `cargoes.vessel_id` FK, capacity enforced under a row lock | `TestConcurrentCargoCreation_NeverExceedsCapacity` |
+| A cargo has many tracking entries | ✅ | `tracking_entries.cargo_id` FK | `TestTrackingRepository_AppendAndListInOrder` |
+| Auditability: movements fully logged, never overwritten | ✅ | every status change, movement and vessel move appends an entry; **database triggers reject UPDATE / DELETE / TRUNCATE** on the history tables | `TestSchema_AuditTablesAreAppendOnly`, `TestTracking_HistoryIsNeverRewritten` |
+
+**Part 3: Testing**
+
+| Requirement | ✓ | Where | How to verify |
+|---|---|---|---|
+| Unit tests: services, handlers with mocks | ✅ | services with in-memory fakes (`internal/service/fakes_test.go`); handlers with fake services (`internal/transport/httpapi/fakes_test.go`) | `make test` |
+| Integration tests: repositories against a test DB | ✅ | `internal/repository/postgres/*_integration_test.go` against real Postgres | `make test-integration` |
+| docker-compose test environment | ✅ | `docker-compose.test.yml`: disposable Postgres + RabbitMQ, plus a `tests` service that runs the suite in Docker | `make test-docker` |
+| 80%+ coverage | ✅ | **94%** combined (`make coverage`, fails under 80%); **95%** on [SonarQube Cloud](https://sonarcloud.io/project/overview?id=drzbraz_deus.ai) | `make coverage`, coverage badge |
+
+**Part 4: Dockerization**
+
+| Requirement | ✓ | Where | How to verify |
+|---|---|---|---|
+| Dockerfile that builds and runs the API | ✅ | multi-stage build → distroless, non-root image | `docker build .` |
+| docker-compose.yml with API + Postgres | ✅ | API, Postgres, RabbitMQ (+ OpenTelemetry collector, Jaeger, Prometheus, Grafana) | `make docker-run` |
+| API at http://localhost:8080 | ✅ | port 8080 | `curl localhost:8080/healthz` |
+| `make docker-run` | ✅ | `Makefile` (waits until the API is up) | CI's "Docker stack" job runs it on every change |
+
+**Deliverables**
+
+| Deliverable | ✓ | Where |
+|---|---|---|
+| Working Go backend API | ✅ | CI builds, tests and boots it on every change |
+| Dockerized setup | ✅ | `Dockerfile`, `docker-compose.yml` |
+| Tests (unit + integration) | ✅ | 267 test functions (plus table-driven cases): next to the code, and black-box suites in [`tests/`](tests/README.md) |
+| README: setup (local & Docker), API docs with examples, design decisions | ✅ | [Quick start](#quick-start-docker), [Local development](#local-development), [API documentation](#api-documentation), [Design decisions](#design-decisions) |
+
+### Bonus: asynchronous event processing (delivered)
+
+| Bonus requirement | ✓ | Where |
+|---|---|---|
+| **Event producer:** on status change, emit `cargo_id`, `old_status`, `new_status`, `timestamp` | ✅ | `CargoService.UpdateStatus` writes the event to an **outbox table in the same transaction** as the change; a relay publishes it with broker confirms (`internal/events/relay.go`). The payload also carries an `event_id` for deduplication. |
+| **Queue:** RabbitMQ, using the provided setup | ✅ | the provided image and credentials (`deus_user` / `deus_pass`), pinned to 4.4; quorum queue `cargo.status_changed` with a dead-letter queue |
+| **Consumer:** background worker that listens for events | ✅ | `internal/events/rabbitmq/consumer.go`, runs in the API process (parallel per cargo, ordered within a cargo) |
+| **…logs and stores them in `cargo_events`** | ✅ | logs `cargo status event stored`, then inserts idempotently into `cargo_events` (`internal/events/handler.go`) |
+
+**See it working:**
+1. `make demo`: step 12 shows the two stored events for the cargo it moved (`GET /api/v1/cargoes/{id}/events`).
+2. The consumer's logs: `docker compose logs api | grep "cargo status event stored"`.
+3. The table itself: `docker compose exec postgres psql -U deus -d logistics -c "SELECT * FROM cargo_events ORDER BY occurred_at DESC LIMIT 5;"`
+4. The queue: RabbitMQ UI at http://localhost:15672 (`deus_user` / `deus_pass`) → Queues → `cargo.status_changed`.
+5. One trace from HTTP request to stored event: Jaeger at http://localhost:16686 → service `logistics-api` → `PATCH /api/v1/cargoes/{cargoID}/status`.
+
+**Proven by tests:** `TestEvents_WireFormatOnTheBroker` (exact message contract), `TestEndToEnd_CargoLifecycleProducesEvents`, `TestEndToEnd_BrokerOutageLosesNoEvents` (RabbitMQ down → nothing lost), `TestDuplicateMessagesAreStoredOnce`, `TestPoisonMessagesAreDeadLetteredAndDoNotBlockTheQueue`. Details in [Event pipeline](#event-pipeline-bonus).
+
+### Evaluation criteria → evidence
+
+| Criterion | Evidence |
 |---|---|
-| Cargo create / retrieve / update status, vessel details, tracking history | [API documentation](#api-documentation), `internal/transport/httpapi` |
-| Clean architecture, interfaces, error wrapping, structured logs | `internal/{domain,service,repository,transport}`, zap |
-| Postgres model, relationships, indexes, migrations, auditability | `migrations/` (append-only history is enforced by DB triggers) |
-| Unit + integration tests, docker-compose test env, 80%+ coverage | [Testing](#testing): 94% |
-| Dockerfile, docker-compose, `make docker-run`, port 8080 | root |
-| **Bonus:** status events → RabbitMQ → consumer → `cargo_events` | [Event pipeline](#event-pipeline-bonus) |
+| 1. Correctness & completeness | checklist above; `make demo`; CI green on every change |
+| 2. API design | REST resources, one envelope, documented error codes, OpenAPI contract enforced in tests, `ETag` / `If-Match`, `Idempotency-Key` |
+| 3. Code quality | ports & adapters, constructor injection, no globals; golangci-lint 0 issues; SonarQube Cloud **A / A / A** (security / reliability / maintainability), 0 bugs, 0 smells, 0% duplication |
+| 4. Database modeling | FKs, constraints, enum, query-matched indexes, append-only triggers, reversible migrations |
+| 5. Error handling & logging | specific 4xx for every bad input, 503 + `Retry-After` when dependencies fail, internals never leaked; structured logs correlated with traces |
+| 6. Testing | 94–95% coverage; unit, integration, black-box e2e, fault-injection (`tests/resilience`) and schema suites; race detector everywhere |
+| 7. Docker expertise | multi-stage distroless image, health-checked compose, pinned images, test compose, CI boots the real stack |
+| 8. Bonus | full event pipeline with transactional outbox, idempotent consumer and dead-letter queue (above) |
 
-Beyond the challenge: transactional outbox (no lost events), idempotency keys and optimistic locking (safe retries and races), OpenTelemetry metrics and traces with a Grafana dashboard, OpenAPI contract + Swagger UI, black-box e2e / fault-injection / schema suites, and CI (lint, vulnerability scan, every suite, Docker stack test).
+### Beyond the brief
+- **Reliability:** transactional outbox (no lost events), idempotency keys and optimistic locking (safe retries and races), graceful shutdown, 503 instead of 500 when dependencies fail.
+- **Observability:** OpenTelemetry traces and per-endpoint latency metrics, a ready-made Grafana dashboard.
+- **Quality pipeline:** CI (lint, vulnerability scan, every suite, Docker stack test), SonarQube Cloud quality gate, SHA-pinned actions kept current by Dependabot.
 
-**Five files that carry the design:**
+### A 15-minute code tour
 1. `internal/domain/status.go`: the forward-only state machine, as one table
 2. `internal/service/cargo_service.go`: `UpdateStatus` locks the cargo, then commits the status, history and event atomically
 3. `internal/repository/postgres/db.go`: Unit of Work (transaction carried in `ctx`) and DB error translation
@@ -102,6 +204,8 @@ curl -s -X PATCH localhost:8080/api/v1/cargoes/$CARGO/status -H 'Content-Type: a
 curl -s localhost:8080/api/v1/cargoes/$CARGO/tracking   # full movement history
 curl -s localhost:8080/api/v1/cargoes/$CARGO/events     # events stored by the consumer
 ```
+
+(The snippet uses `jq`. `make demo` runs a longer version of this tour with no extra tools.)
 
 Other targets: `make docker-logs`, `make docker-down` (also deletes volumes), `make help`.
 
@@ -309,7 +413,7 @@ Event payload (routing key `cargo.status_changed`):
 
 - **Transactional outbox.** The event is written in the same transaction as the status change. An event exists if and only if the change was committed, even if the process crashes or RabbitMQ is down.
 - **Relay.** Claims pending rows with `FOR UPDATE SKIP LOCKED`, so several API replicas can run it safely. It publishes with **publisher confirms** and marks a row published only after the broker acknowledges it. It stops a batch at the first failure to keep events in order, then backs off exponentially with jitter.
-- **Consumer.** Stores events on `CONSUMER_WORKERS` goroutines. The publisher puts the cargo id in an AMQP header, and the consumer always sends a given cargo to the same worker, so **different cargoes are processed in parallel while each cargo's events keep their order** within a consumer instance. (With several API replicas consuming, RabbitMQ spreads messages across them; storage stays correct because inserts are idempotent and reads sort by `occurred_at`. Strict cross-replica ordering would need the queue's single-active-consumer mode.) Uses manual acks, and prefetch is 5 per worker for backpressure. It stores each event **idempotently** (`cargo_events.id` = `event_id`), so redeliveries are harmless.
+- **Consumer.** Stores events on `CONSUMER_WORKERS` goroutines. The publisher puts the cargo id in an AMQP header, and the consumer always sends a given cargo to the same worker, so **different cargoes are processed in parallel while each cargo's events keep their order** within a consumer instance. (With several API replicas consuming, RabbitMQ spreads messages across them; storage stays correct because inserts are idempotent and reads sort by `occurred_at`. Strict cross-replica ordering would need the queue's single-active-consumer mode.) Uses manual acks; the prefetch window is 5 messages per worker, for backpressure. It stores each event **idempotently** (`cargo_events.id` = `event_id`), so redeliveries are harmless.
   - Malformed messages, or events for unknown cargo, are rejected to the **DLQ**.
   - While Postgres is down it retries the same message instead of requeueing it, so an outage cannot push healthy messages into the DLQ.
   - The quorum queue's `x-delivery-limit` dead-letters a message that keeps crashing the worker.
@@ -350,7 +454,7 @@ The latency histogram is labelled with the **route pattern** (`/api/v1/cargoes/{
 ```bash
 make test               # unit tests, no infrastructure (race detector on)
 make test-integration   # unit + integration + end-to-end against disposable Postgres & RabbitMQ (docker-compose.test.yml)
-make test-docker        # the same suite, run entirely inside Docker (no local Go needed)
+make test-docker        # every suite, run entirely inside Docker (no local Go needed)
 make test-e2e           # black-box suites in tests/ (e2e, resilience, schema)
 make test-e2e-stack     # black-box e2e suite against the running `make docker-run` stack
 make test-all           # every suite with -race
@@ -359,7 +463,7 @@ make lint               # golangci-lint: vet, staticcheck, gosec, errorlint, wra
 make vuln               # govulncheck: known vulnerabilities in dependencies and the Go toolchain
 ```
 
-Besides the unit and integration tests next to the code, [`tests/`](tests/README.md) holds a separate **black-box suite** (about 240 cases). It covers every API flow and edge case over HTTP, plus fault injection (database and broker outages, lock timeouts, poison and duplicate messages, crashes, shutdown under load) and schema integrity.
+Besides the unit and integration tests next to the code, [`tests/`](tests/README.md) holds a separate **black-box suite** (108 test functions, many of them table-driven). It covers every API flow and edge case over HTTP, plus fault injection (database and broker outages, lock timeouts, poison and duplicate messages, crashes, shutdown under load) and schema integrity.
 
 | Layer | How it is tested |
 |---|---|
@@ -391,6 +495,8 @@ Besides the unit and integration tests next to the code, [`tests/`](tests/README
 | Graceful shutdown drains in-flight requests | `TestServe_DrainsInFlightRequestsOnShutdown` |
 | Consumer runs cargoes in parallel, never reorders one cargo | `TestConsumer_ParallelAcrossCargoesOrderedWithinCargo`, `TestShardedPool_PreservesOrderPerKey` |
 | Readiness checks run concurrently (probe time = slowest check) | `TestReadiness_ChecksRunConcurrently` |
+| A slow cargo never starves the other consumer workers | `TestShardedPool_BusyWorkerDoesNotStarveOthers` |
+| A vessel move racing a delivery never records a movement after it | `TestConcurrentVesselMoveAndDelivery_NoMovementAfterDelivery`, `TestConcurrency_VesselMovesRacingDeliveryNeverFollowIt` |
 | Latency metric uses route patterns, not ids | `TestLatencyMetricUsesRoutePattern` |
 
 ### Continuous integration
@@ -405,7 +511,7 @@ Besides the unit and integration tests next to the code, [`tests/`](tests/README
 | Docker stack + black-box e2e | builds the image, boots the full `docker-compose` stack, runs the e2e and schema suites against it over HTTP |
 | SonarQube Cloud | imports the coverage and golangci-lint reports and applies the quality gate; results are public on the [dashboard](https://sonarcloud.io/project/overview?id=drzbraz_deus.ai) and posted on each pull request |
 
-Tool versions are pinned in the `Makefile` and the workflow, so local runs and CI behave the same.
+Tool versions are pinned in the `Makefile` and the workflow, and Go itself comes from the `toolchain` line in `go.mod`, so local runs and CI behave the same. Every GitHub Action is pinned to a full commit SHA; Dependabot keeps those pins and the Go modules current.
 
 **SonarQube Cloud setup** (one-time, for forks of this repository): import the repository on sonarcloud.io, turn off *Automatic Analysis* (CI-based analysis is what brings in coverage), and add the project token as the `SONAR_TOKEN` repository secret. The keys in `sonar-project.properties` must match the project. Without the secret the job skips itself instead of failing.
 
@@ -445,6 +551,8 @@ idempotency_keys  (stored responses for Idempotency-Key)
 
 **Why these libraries.** chi gives `net/http`-compatible routing, plus the route pattern needed for metric labels. zap is listed in the spec and gives fast structured logs. pgx with raw SQL keeps queries explicit and reviewable (locking clauses like `FOR UPDATE SKIP LOCKED` would fight an ORM). amqp091-go is the official RabbitMQ client.
 
+**Credentials.** Every password in the repository (`deus` / `deus`, `deus_user` / `deus_pass`) is a fixed, non-secret default for disposable local and CI containers; the RabbitMQ ones come from the challenge's own helper. The application reads every connection string from environment variables (`DATABASE_URL`, `RABBITMQ_URL`), so a real deployment injects them from a secrets manager.
+
 **Capacity locking detail.** `VesselRepository.GetForUpdate` locks the vessel and then computes its load in a *second* statement. Under READ COMMITTED, a single `SELECT ... FOR UPDATE` with a load subquery uses the snapshot from *before* it waited for the lock. It would miss cargo committed by the transaction it waited on, and the vessel could be overbooked. The concurrent-creation regression test covers this.
 
 ## Resilience and edge cases
@@ -477,7 +585,8 @@ idempotency_keys  (stored responses for Idempotency-Key)
 ## Project layout
 
 ```
-.github/workflows/ci.yml     CI: lint, vulnerability scan, every test suite, Docker stack test
+.github/workflows/ci.yml     CI: lint, vulnerability scan, every test suite, Docker stack test, SonarQube Cloud
+.github/dependabot.yml       weekly updates for the pinned actions and Go modules
 .golangci.yml                linter configuration
 sonar-project.properties     SonarQube Cloud analysis settings
 api/openapi.yaml             OpenAPI 3 contract (embedded; served at /openapi.yaml and /docs)
