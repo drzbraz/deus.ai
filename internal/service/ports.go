@@ -34,6 +34,8 @@ type CargoRepository interface {
 	// GetForUpdate locks the cargo row so concurrent status changes are serialised.
 	GetForUpdate(ctx context.Context, id uuid.UUID) (domain.Cargo, error)
 	List(ctx context.Context, filter domain.CargoFilter) ([]domain.Cargo, error)
+	// ListForUpdateByVessel locks every cargo of the vessel in the given status.
+	ListForUpdateByVessel(ctx context.Context, vesselID uuid.UUID, status domain.Status) ([]domain.Cargo, error)
 	Update(ctx context.Context, cargo domain.Cargo) error
 }
 

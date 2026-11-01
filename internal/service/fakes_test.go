@@ -136,7 +136,25 @@ func (r memCargoes) Get(_ context.Context, id uuid.UUID) (domain.Cargo, error) {
 	if !ok {
 		return domain.Cargo{}, domain.ErrNotFound
 	}
+	for _, e := range r.m.tracking { // derived like the real query: latest entry
+		if e.CargoID == id {
+			c.CurrentLocation = e.Location
+		}
+	}
 	return c, nil
+}
+
+func (r memCargoes) ListForUpdateByVessel(_ context.Context, vesselID uuid.UUID, status domain.Status) ([]domain.Cargo, error) {
+	if err := r.m.fail("cargoes.lock_by_vessel"); err != nil {
+		return nil, err
+	}
+	var out []domain.Cargo
+	for _, c := range r.m.cargoes {
+		if c.VesselID == vesselID && c.Status == status {
+			out = append(out, c)
+		}
+	}
+	return out, nil
 }
 
 func (r memCargoes) GetForUpdate(ctx context.Context, id uuid.UUID) (domain.Cargo, error) {

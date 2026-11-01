@@ -54,7 +54,7 @@ func (r *OutboxRepository) Enqueue(ctx context.Context, event domain.StatusChang
 // several relay instances share the outbox without publishing a row twice.
 func (r *OutboxRepository) FetchUnpublished(ctx context.Context, limit int) ([]events.OutboxMessage, error) {
 	rows, err := r.q(ctx).Query(ctx,
-		`SELECT id, event_type, payload, headers, attempts FROM outbox
+		`SELECT id, aggregate_id, event_type, payload, headers, attempts FROM outbox
 		 WHERE published_at IS NULL
 		 ORDER BY created_at, id
 		 LIMIT $1
@@ -67,7 +67,7 @@ func (r *OutboxRepository) FetchUnpublished(ctx context.Context, limit int) ([]e
 	var messages []events.OutboxMessage
 	for rows.Next() {
 		var msg events.OutboxMessage
-		if err := rows.Scan(&msg.ID, &msg.RoutingKey, &msg.Payload, &msg.Headers, &msg.Attempts); err != nil {
+		if err := rows.Scan(&msg.ID, &msg.AggregateID, &msg.RoutingKey, &msg.Payload, &msg.Headers, &msg.Attempts); err != nil {
 			return nil, wrapErr("scan outbox message", err)
 		}
 		messages = append(messages, msg)

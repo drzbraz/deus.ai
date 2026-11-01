@@ -282,3 +282,51 @@ func ids(cargoes []domain.Cargo) []uuid.UUID {
 	}
 	return out
 }
+
+func TestCargoRepository_CurrentLocationIsTheLatestEntry(t *testing.T) {
+	ctx := context.Background()
+	cargoes := postgres.NewCargoRepository(testPool)
+	tracking := postgres.NewTrackingRepository(testPool)
+	cargo := newCargo(t, newVessel(t, 100).ID, 1)
+
+	got, err := cargoes.Get(ctx, cargo.ID)
+	require.NoError(t, err)
+	assert.Empty(t, got.CurrentLocation, "no history yet")
+
+	start := service.SystemClock()
+	for i, location := range []string{"Lisbon", "Gibraltar", "Suez"} {
+		entry, err := domain.NewTrackingEntry(cargo, location, "", start.Add(time.Duration(i)*time.Minute))
+		require.NoError(t, err)
+		require.NoError(t, tracking.Append(ctx, entry))
+	}
+
+	got, err = cargoes.Get(ctx, cargo.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "Suez", got.CurrentLocation)
+
+	listed, err := cargoes.List(ctx, domain.CargoFilter{VesselID: &cargo.VesselID, Page: domain.Page{Limit: 10}})
+	require.NoError(t, err)
+	require.Len(t, listed, 1)
+	assert.Equal(t, "Suez", listed[0].CurrentLocation)
+}
+
+func TestCargoRepository_ListForUpdateByVessel(t *testing.T) {
+	ctx := context.Background()
+	repo := postgres.NewCargoRepository(testPool)
+	vessel := newVessel(t, 100)
+	moving := newCargo(t, vessel.ID, 1)
+	newCargo(t, vessel.ID, 1) // pending
+	newCargo(t, newVessel(t, 100).ID, 1)
+	_, err := moving.ChangeStatus(domain.StatusInTransit, service.SystemClock())
+	require.NoError(t, err)
+	require.NoError(t, repo.Update(ctx, moving))
+
+	var locked []domain.Cargo
+	err = postgres.NewTxManager(testPool).WithinTx(ctx, func(ctx context.Context) error {
+		locked, err = repo.ListForUpdateByVessel(ctx, vessel.ID, domain.StatusInTransit)
+		return err
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, []uuid.UUID{moving.ID}, ids(locked))
+}

@@ -69,9 +69,12 @@ func DecodeStatusChanged(payload []byte) (domain.StatusChanged, error) {
 
 // OutboxMessage is an event waiting in the outbox to be published.
 type OutboxMessage struct {
-	ID         uuid.UUID
-	RoutingKey string
-	Payload    []byte
+	ID uuid.UUID
+	// AggregateID is the cargo the event belongs to; events of one cargo
+	// must be consumed in order.
+	AggregateID uuid.UUID
+	RoutingKey  string
+	Payload     []byte
 	// Headers carry the W3C trace context captured when the event was created.
 	Headers  map[string]string
 	Attempts int

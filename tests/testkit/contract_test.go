@@ -15,7 +15,7 @@ func TestCheckContract(t *testing.T) {
 	cargoPath := "/api/v1/cargoes/0192d6c0-0000-7000-8000-000000000002"
 	jsonHeader := http.Header{"Content-Type": []string{"application/json"}}
 	valid := `{"data":{"id":"0192d6c0-0000-7000-8000-000000000002","name":"x","description":"","weight_kg":1,
-		"status":"pending","vessel_id":"0192d6c0-0000-7000-8000-000000000001","version":1,
+		"status":"pending","vessel_id":"0192d6c0-0000-7000-8000-000000000001","current_location":"Lisbon","version":1,
 		"created_at":"2026-10-29T12:00:00Z","updated_at":"2026-10-29T12:00:00Z"}}`
 
 	tests := []struct {

@@ -41,9 +41,11 @@ services:
       timeout: 3s
       retries: 20
 
-  # Same image and credentials as the RabbitMQ helper provided with the challenge.
+  # Same credentials as the RabbitMQ helper provided with the challenge; the
+  # image is pinned (the helper's `rabbitmq:management` floats to latest) so
+  # behaviour such as quorum-queue delivery counting cannot change under us.
   rabbitmq:
-    image: rabbitmq:management
+    image: rabbitmq:4.4-management
     environment:
       RABBITMQ_DEFAULT_USER: deus_user
       RABBITMQ_DEFAULT_PASS: deus_pass

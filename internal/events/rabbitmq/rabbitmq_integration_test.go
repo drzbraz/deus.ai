@@ -4,8 +4,12 @@ package rabbitmq_test
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"math/rand/v2"
 	"os"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -123,6 +127,210 @@ func TestConsumer_StopsWhileBrokerUnreachable(t *testing.T) {
 	defer cancel()
 
 	consumer.Run(ctx) // must return once ctx is done, despite never connecting
+}
+
+// orderingHandler records, per cargo, the order in which events were handled,
+// and the highest number of events handled at the same time.
+type orderingHandler struct {
+	marker  string
+	mu      sync.Mutex
+	order   map[string][]int
+	running atomic.Int32
+	peak    atomic.Int32
+}
+
+func (h *orderingHandler) Handle(_ context.Context, payload []byte) events.Decision {
+	var msg struct {
+		Marker string `json:"marker"`
+		Cargo  string `json:"cargo"`
+		Seq    int    `json:"seq"`
+	}
+	if json.Unmarshal(payload, &msg) != nil || msg.Marker != h.marker {
+		return events.Ack // another test's message
+	}
+
+	now := h.running.Add(1)
+	for peak := h.peak.Load(); now > peak && !h.peak.CompareAndSwap(peak, now); peak = h.peak.Load() {
+	}
+	time.Sleep(time.Duration(rand.IntN(3000)) * time.Microsecond)
+	h.running.Add(-1)
+
+	h.mu.Lock()
+	h.order[msg.Cargo] = append(h.order[msg.Cargo], msg.Seq)
+	h.mu.Unlock()
+	return events.Ack
+}
+
+func (h *orderingHandler) handled() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	n := 0
+	for _, seqs := range h.order {
+		n += len(seqs)
+	}
+	return n
+}
+
+// Regression: the consumer processes different cargoes in parallel but never
+// reorders the events of one cargo.
+func TestConsumer_ParallelAcrossCargoesOrderedWithinCargo(t *testing.T) {
+	publisher := rabbitmq.NewPublisher(brokerURL())
+	t.Cleanup(func() { _ = publisher.Close() })
+	handler := &orderingHandler{marker: uuid.NewString(), order: map[string][]int{}}
+
+	const cargoes, perCargo = 20, 10
+	ids := make([]uuid.UUID, cargoes)
+	for i := range ids {
+		ids[i] = uuid.New()
+	}
+	for seq := range perCargo {
+		for _, id := range ids {
+			body := fmt.Sprintf(`{"marker":%q,"cargo":%q,"seq":%d}`, handler.marker, id, seq)
+			require.NoError(t, publisher.Publish(context.Background(), events.OutboxMessage{
+				ID: uuid.New(), AggregateID: id, RoutingKey: events.RoutingKeyStatusChanged, Payload: []byte(body),
+			}))
+		}
+	}
+
+	consumer := rabbitmq.NewConsumer(brokerURL(), handler, zap.NewNop(), backoff.Default(), rabbitmq.WithWorkers(8))
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { consumer.Run(ctx); close(done) }()
+	t.Cleanup(func() { cancel(); <-done })
+
+	require.Eventually(t, func() bool { return handler.handled() == cargoes*perCargo }, 30*time.Second, 20*time.Millisecond)
+
+	handler.mu.Lock()
+	defer handler.mu.Unlock()
+	for cargo, seqs := range handler.order {
+		for i, seq := range seqs {
+			require.Equal(t, i, seq, "cargo %s handled out of order: %v", cargo, seqs)
+		}
+	}
+	assert.Greater(t, handler.peak.Load(), int32(1), "events of different cargoes must be handled in parallel")
+}
+
+// countingHandler records which of its messages were acknowledged.
+type countingHandler struct {
+	marker  string
+	work    func(ctx context.Context)
+	mu      sync.Mutex
+	handled map[string]bool
+}
+
+func (h *countingHandler) Handle(ctx context.Context, payload []byte) events.Decision {
+	var msg struct {
+		Marker string `json:"marker"`
+		ID     string `json:"id"`
+	}
+	if json.Unmarshal(payload, &msg) != nil || msg.Marker != h.marker {
+		return events.Ack
+	}
+	h.work(ctx)
+	if ctx.Err() != nil {
+		return events.Requeue
+	}
+	h.mu.Lock()
+	h.handled[msg.ID] = true
+	h.mu.Unlock()
+	return events.Ack
+}
+
+func (h *countingHandler) count() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.handled)
+}
+
+func publishMarked(t *testing.T, marker string, n int) {
+	t.Helper()
+	publisher := rabbitmq.NewPublisher(brokerURL())
+	defer publisher.Close()
+	for i := range n {
+		body := fmt.Sprintf(`{"marker":%q,"id":"%d"}`, marker, i)
+		require.NoError(t, publisher.Publish(context.Background(), events.OutboxMessage{
+			ID: uuid.New(), AggregateID: uuid.New(), RoutingKey: events.RoutingKeyStatusChanged, Payload: []byte(body),
+		}))
+	}
+}
+
+// runConsumer starts a consumer and returns a function that stops it and
+// reports how long the shutdown took.
+func runConsumer(handler rabbitmq.MessageHandler) func() time.Duration {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		rabbitmq.NewConsumer(brokerURL(), handler, zap.NewNop(), backoff.Default(), rabbitmq.WithWorkers(4)).Run(ctx)
+		close(done)
+	}()
+	return func() time.Duration {
+		started := time.Now()
+		cancel()
+		<-done
+		return time.Since(started)
+	}
+}
+
+// Regression: stopping the consumer in the middle of a backlog neither
+// deadlocks nor loses messages; what was not handled is redelivered.
+func TestConsumer_ShutdownUnderLoadLosesNothing(t *testing.T) {
+	const total = 120
+	marker := uuid.NewString()
+	publishMarked(t, marker, total)
+
+	first := &countingHandler{marker: marker, handled: map[string]bool{},
+		work: func(context.Context) { time.Sleep(5 * time.Millisecond) }}
+	stop := runConsumer(first)
+	require.Eventually(t, func() bool { return first.count() >= 20 }, 15*time.Second, 5*time.Millisecond)
+	assert.Less(t, stop(), 5*time.Second, "shutdown must not hang")
+	require.Less(t, first.count(), total, "the test must stop mid-backlog")
+
+	second := &countingHandler{marker: marker, handled: map[string]bool{}, work: func(context.Context) {}}
+	stopSecond := runConsumer(second)
+	defer stopSecond()
+	require.Eventually(t, func() bool {
+		missing := 0
+		for i := range total {
+			id := fmt.Sprint(i)
+			first.mu.Lock()
+			second.mu.Lock()
+			if !first.handled[id] && !second.handled[id] {
+				missing++
+			}
+			second.mu.Unlock()
+			first.mu.Unlock()
+		}
+		return missing == 0
+	}, 20*time.Second, 20*time.Millisecond, "every message is handled by one of the two consumers")
+}
+
+// Regression: workers stuck in a slow dependency (e.g. the database is down)
+// must not block shutdown.
+func TestConsumer_ShutdownWithStuckWorkers(t *testing.T) {
+	marker := uuid.NewString()
+	publishMarked(t, marker, 30)
+
+	stuck := make(chan struct{}, 30)
+	handler := &countingHandler{marker: marker, handled: map[string]bool{}, work: func(ctx context.Context) {
+		stuck <- struct{}{}
+		<-ctx.Done() // blocked until shutdown, like a DB call that never returns
+	}}
+	stop := runConsumer(handler)
+	select {
+	case <-stuck: // with random cargo ids not every worker is guaranteed a message
+	case <-time.After(15 * time.Second):
+		t.Fatal("workers never started")
+	}
+	time.Sleep(100 * time.Millisecond) // let the other workers pick up theirs
+
+	assert.Less(t, stop(), 5*time.Second, "stuck workers must be released by shutdown")
+	assert.Zero(t, handler.count())
+
+	drain := &countingHandler{marker: marker, handled: map[string]bool{}, work: func(context.Context) {}}
+	stopDrain := runConsumer(drain)
+	defer stopDrain()
+	require.Eventually(t, func() bool { return drain.count() == 30 }, 20*time.Second, 20*time.Millisecond,
+		"requeued messages are redelivered")
 }
 
 func dlqContains(t *testing.T, body string) bool {

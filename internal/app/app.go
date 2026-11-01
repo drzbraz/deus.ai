@@ -129,7 +129,8 @@ func (a *App) wire() error {
 	}
 	if a.cfg.ConsumerEnabled {
 		handler := events.NewHandler(postgres.NewCargoEventRepository(a.pool), metrics, a.log, backoff.Default())
-		consumer := rabbitmq.NewConsumer(a.cfg.RabbitMQURL, handler, a.log, backoff.Default())
+		consumer := rabbitmq.NewConsumer(a.cfg.RabbitMQURL, handler, a.log, backoff.Default(),
+			rabbitmq.WithWorkers(a.cfg.ConsumerWorkers))
 		a.workers = append(a.workers, worker{"event consumer", consumer.Run})
 	}
 	a.workers = append(a.workers, worker{"idempotency cleanup", func(ctx context.Context) {

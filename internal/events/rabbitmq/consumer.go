@@ -15,8 +15,11 @@ import (
 
 const (
 	consumerTag = "logistics-api"
-	// prefetch bounds unacknowledged messages held by this consumer.
-	prefetch = 10
+	// DefaultWorkers is how many events are stored in parallel.
+	DefaultWorkers = 4
+	// prefetchPerWorker sizes the broker's prefetch window: at most
+	// workers*prefetchPerWorker messages are unacknowledged at any time.
+	prefetchPerWorker = 5
 )
 
 var errDeliveriesClosed = errors.New("delivery channel closed by broker")
@@ -27,16 +30,30 @@ type MessageHandler interface {
 }
 
 // Consumer is the background worker that reads cargo status events. It
-// reconnects with backoff whenever the broker connection is lost.
+// stores events on several goroutines, keeping each cargo's events in order
+// (see shardedPool), and reconnects with backoff whenever the broker
+// connection is lost.
 type Consumer struct {
 	url     string
 	handler MessageHandler
 	log     *zap.Logger
 	backoff backoff.Policy
+	workers int
 }
 
-func NewConsumer(url string, handler MessageHandler, log *zap.Logger, policy backoff.Policy) *Consumer {
-	return &Consumer{url: url, handler: handler, log: log, backoff: policy}
+type ConsumerOption func(*Consumer)
+
+// WithWorkers sets how many events are processed in parallel (minimum 1).
+func WithWorkers(n int) ConsumerOption {
+	return func(c *Consumer) { c.workers = max(n, 1) }
+}
+
+func NewConsumer(url string, handler MessageHandler, log *zap.Logger, policy backoff.Policy, opts ...ConsumerOption) *Consumer {
+	c := &Consumer{url: url, handler: handler, log: log, backoff: policy, workers: DefaultWorkers}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c
 }
 
 // Run consumes until ctx is cancelled.
@@ -69,11 +86,20 @@ func (c *Consumer) consume(ctx context.Context) (connected bool, err error) {
 	}
 	defer conn.Close()
 
-	deliveries, err := subscribe(conn)
+	prefetch := c.workers * prefetchPerWorker
+	deliveries, err := subscribe(conn, prefetch)
 	if err != nil {
 		return false, err
 	}
-	c.log.Info("event consumer connected", zap.String("queue", Queue))
+	c.log.Info("event consumer connected", zap.String("queue", Queue), zap.Int("workers", c.workers))
+
+	// Each worker can buffer the whole prefetch window. The broker never has
+	// more than prefetch unacknowledged messages out, so dispatch never blocks
+	// on one busy worker while the others sit idle (a slow cargo cannot
+	// starve the rest). Deferred after conn.Close, so it runs first: workers
+	// finish (and ack) the messages they hold while the channel is still open.
+	pool := newShardedPool(c.workers, prefetch, func(d amqp.Delivery) { c.process(ctx, d) })
+	defer pool.stop()
 
 	for {
 		select {
@@ -83,12 +109,23 @@ func (c *Consumer) consume(ctx context.Context) (connected bool, err error) {
 			if !ok {
 				return true, errDeliveriesClosed
 			}
-			c.process(ctx, delivery)
+			if !pool.dispatch(ctx, orderingKey(delivery), delivery) {
+				c.acknowledge(delivery, delivery.Nack(false, true)) // shutting down: give it back
+			}
 		}
 	}
 }
 
-func subscribe(conn *amqp.Connection) (<-chan amqp.Delivery, error) {
+// orderingKey is the cargo id set by the publisher. Messages without it
+// (e.g. published by another tool) are spread by message id.
+func orderingKey(d amqp.Delivery) string {
+	if key, ok := d.Headers[headerAggregateID].(string); ok && key != "" {
+		return key
+	}
+	return d.MessageId
+}
+
+func subscribe(conn *amqp.Connection, prefetch int) (<-chan amqp.Delivery, error) {
 	ch, err := conn.Channel()
 	if err != nil {
 		return nil, fmt.Errorf("open channel: %w", err)
@@ -107,6 +144,14 @@ func subscribe(conn *amqp.Connection) (<-chan amqp.Delivery, error) {
 }
 
 func (c *Consumer) process(ctx context.Context, d amqp.Delivery) {
+	// Shutting down: give queued messages back without running the handler.
+	// An explicit requeue does not count towards the queue's delivery limit
+	// (a connection close does), so restarts cannot dead-letter good events.
+	if ctx.Err() != nil {
+		c.acknowledge(d, d.Nack(false, true))
+		return
+	}
+
 	ctx = otel.GetTextMapPropagator().Extract(ctx, headerCarrier(d.Headers))
 
 	var err error
@@ -118,9 +163,14 @@ func (c *Consumer) process(ctx context.Context, d amqp.Delivery) {
 	case events.Requeue:
 		err = d.Nack(false, true)
 	}
+	c.acknowledge(d, err)
+}
+
+// acknowledge logs a failed ack/nack. The broker redelivers unacknowledged
+// messages when the channel closes, and the handler is idempotent, so logging
+// is enough.
+func (c *Consumer) acknowledge(d amqp.Delivery, err error) {
 	if err != nil {
-		// The broker redelivers unacknowledged messages when the channel
-		// closes, and the handler is idempotent, so logging is enough.
 		c.log.Warn("acknowledge delivery", zap.Error(err), zap.String("message_id", d.MessageId))
 	}
 }

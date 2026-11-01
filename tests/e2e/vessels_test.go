@@ -267,3 +267,46 @@ func TestVessel_LoadTracksCargoLifecycle(t *testing.T) {
 		}
 	}
 }
+
+// Cargo travels with its vessel: moving the ship records a movement for the
+// cargo in transit on it, and updates where that cargo currently is.
+func TestVessel_MovingCarriesCargoInTransit(t *testing.T) {
+	c := api(t)
+	vessel := c.NewVessel(1000)
+	pending := c.NewCargo(vessel.ID, 1)
+	moving := c.NewCargo(vessel.ID, 1)
+	delivered := c.NewCargo(vessel.ID, 1)
+	c.Patch(CargoPath(moving.ID)+"/status", map[string]any{"status": InTransit, "location": "Rotterdam port"})
+	c.MustChangeStatus(delivered.ID, InTransit)
+	c.MustChangeStatus(delivered.ID, Delivered)
+	before := map[string]int{pending.ID: 1, moving.ID: 2, delivered.ID: 3}
+
+	for _, waypoint := range []string{"North Sea", "Port Said", "Singapore"} {
+		resp := c.Patch(VesselPath(vessel.ID)+"/location", map[string]any{"current_location": waypoint})
+		require.Equal(t, http.StatusOK, resp.Status, resp.String())
+	}
+
+	history := c.History(moving.ID)
+	assert.Equal(t, []string{"Rotterdam", "Rotterdam port", "North Sea", "Port Said", "Singapore"}, locations(history))
+	for _, entry := range history[2:] {
+		assert.Equal(t, InTransit, entry.Status)
+		assert.Equal(t, "moved with vessel", entry.Note)
+	}
+	assert.Equal(t, "Singapore", c.GetCargo(moving.ID).CurrentLocation)
+	assert.Equal(t, 2, c.GetCargo(moving.ID).Version, "a movement is not a status change")
+	c.WaitForEvents(moving.ID, 1)
+	c.AssertEventCountStays(moving.ID, 1)
+
+	assert.Len(t, c.History(pending.ID), before[pending.ID], "pending cargo has not left port")
+	assert.Equal(t, "Rotterdam", c.GetCargo(pending.ID).CurrentLocation)
+	assert.Len(t, c.History(delivered.ID), before[delivered.ID], "delivered cargo was unloaded")
+}
+
+func TestVessel_MoveWithoutCargoStillSucceeds(t *testing.T) {
+	c := api(t)
+	vessel := c.NewVessel(10)
+
+	resp := c.Patch(VesselPath(vessel.ID)+"/location", map[string]any{"current_location": "Azores"})
+
+	assert.Equal(t, http.StatusOK, resp.Status)
+}

@@ -56,6 +56,7 @@ func TestCreateCargo_StartsPendingWithInitialTrackingEntry(t *testing.T) {
 	cargo := f.createCargo(t, 100)
 
 	assert.Equal(t, domain.StatusPending, cargo.Status)
+	assert.Equal(t, "Rotterdam", cargo.CurrentLocation)
 	require.Len(t, f.store.tracking, 1)
 	assert.Equal(t, "Rotterdam", f.store.tracking[0].Location)
 	assert.Equal(t, domain.StatusPending, f.store.tracking[0].Status)
@@ -124,6 +125,7 @@ func TestUpdateStatus_ForwardTransitionWritesTrackingAndOutbox(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, domain.StatusInTransit, updated.Status)
 	assert.Equal(t, 2, updated.Version)
+	assert.Equal(t, "Suez", updated.CurrentLocation)
 
 	require.Len(t, f.store.tracking, 2)
 	assert.Equal(t, "Suez", f.store.tracking[1].Location)

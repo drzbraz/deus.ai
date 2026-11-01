@@ -25,6 +25,10 @@ docker-run: ## Build and start the full stack (API on http://localhost:8080)
 	@echo "Prometheus  http://localhost:9090"
 	@echo "RabbitMQ    http://localhost:15672 (deus_user / deus_pass)"
 
+.PHONY: demo
+demo: ## Guided tour of the API against the running stack (run `make docker-run` first)
+	./scripts/demo.sh
+
 .PHONY: docker-down
 docker-down: ## Stop the stack and delete its volumes
 	docker compose down -v

@@ -5,8 +5,10 @@ package postgres_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -96,6 +98,39 @@ func TestConcurrentMovementAndDelivery_HistoryEndsAtDelivery(t *testing.T) {
 	assert.Equal(t, domain.StatusDelivered, history[len(history)-1].Status)
 }
 
+// Regression: a vessel move racing a delivery must never append an
+// in-transit movement after the delivery entry.
+func TestConcurrentVesselMoveAndDelivery_NoMovementAfterDelivery(t *testing.T) {
+	ctx := context.Background()
+	cargoes := service.NewCargoService(repos(), service.SystemClock, noopRecorder{})
+	vessels := service.NewVesselService(repos(), service.SystemClock)
+
+	for round := range 15 {
+		vessel := newVessel(t, 100)
+		cargo, err := cargoes.Create(ctx, service.CreateCargoInput{Name: "x", WeightKg: 1, VesselID: vessel.ID})
+		require.NoError(t, err)
+		_, err = cargoes.UpdateStatus(ctx, service.UpdateStatusInput{CargoID: cargo.ID, Status: "in_transit"})
+		require.NoError(t, err)
+
+		results := runConcurrently(2, func() func() error {
+			var turn atomic.Int32
+			return func() error {
+				if turn.Add(1) == 1 {
+					_, err := vessels.UpdateLocation(ctx, vessel.ID, fmt.Sprintf("waypoint-%d", round))
+					return err
+				}
+				_, err := cargoes.UpdateStatus(ctx, service.UpdateStatusInput{CargoID: cargo.ID, Status: "delivered"})
+				return err
+			}
+		}())
+		require.Equal(t, 2, count(results, nil), "round %d: both operations succeed", round)
+
+		history, err := postgres.NewTrackingRepository(testPool).ListByCargo(ctx, cargo.ID)
+		require.NoError(t, err)
+		assert.Equal(t, domain.StatusDelivered, history[len(history)-1].Status, "round %d: delivery is always the last entry", round)
+	}
+}
+
 func TestOutbox_EnqueueFetchAndMark(t *testing.T) {
 	ctx := context.Background()
 	drainOutbox(t)
@@ -114,6 +149,7 @@ func TestOutbox_EnqueueFetchAndMark(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, messages, 1)
 		assert.Equal(t, event.EventID, messages[0].ID)
+		assert.Equal(t, cargo.ID, messages[0].AggregateID, "the relay needs the cargo id to keep per-cargo order")
 		assert.Equal(t, events.RoutingKeyStatusChanged, messages[0].RoutingKey)
 
 		decoded, err := events.DecodeStatusChanged(messages[0].Payload)

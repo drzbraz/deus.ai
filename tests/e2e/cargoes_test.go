@@ -29,6 +29,7 @@ func TestCargo_CreateStartsPendingWithVersionAndETag(t *testing.T) {
 	assert.Equal(t, 12.5, cargo.WeightKg)
 	assert.Equal(t, Pending, cargo.Status)
 	assert.Equal(t, vessel.ID, cargo.VesselID)
+	assert.Equal(t, "Rotterdam", cargo.CurrentLocation, "a new cargo is where its vessel is")
 	assert.Equal(t, 1, cargo.Version)
 	assert.Equal(t, `"1"`, resp.Header.Get("ETag"))
 	assert.Equal(t, CargoPath(cargo.ID), resp.Header.Get("Location"))
@@ -215,4 +216,28 @@ func TestCargo_ListRejectsBadFilters(t *testing.T) {
 
 func TestCargo_UnknownQueryParametersAreIgnored(t *testing.T) {
 	assert.Equal(t, http.StatusOK, api(t).Get("/api/v1/cargoes?color=red").Status)
+}
+
+// current_location always follows the latest tracking entry, whatever created it.
+func TestCargo_CurrentLocationFollowsTheHistory(t *testing.T) {
+	c := api(t)
+	vessel := c.NewVessel(100)
+	cargo := c.NewCargo(vessel.ID, 1)
+	where := func() string { return c.GetCargo(cargo.ID).CurrentLocation }
+
+	assert.Equal(t, "Rotterdam", where())
+
+	c.Post(CargoPath(cargo.ID)+"/tracking", map[string]any{"location": "Warehouse 7"})
+	assert.Equal(t, "Warehouse 7", where(), "explicit movement")
+
+	resp := c.Patch(CargoPath(cargo.ID)+"/status", map[string]any{"status": InTransit, "location": "Quay 3"})
+	assert.Equal(t, "Quay 3", Data[Cargo](t, resp).CurrentLocation, "status change response")
+	assert.Equal(t, "Quay 3", where())
+
+	c.Patch(VesselPath(vessel.ID)+"/location", map[string]any{"current_location": "Atlantic"})
+	assert.Equal(t, "Atlantic", where(), "moved with the vessel")
+
+	listed := Data[[]Cargo](t, c.Get("/api/v1/cargoes?vessel_id="+vessel.ID))
+	require.Len(t, listed, 1)
+	assert.Equal(t, "Atlantic", listed[0].CurrentLocation, "list and detail agree")
 }

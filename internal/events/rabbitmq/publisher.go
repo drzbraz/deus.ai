@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	amqp "github.com/rabbitmq/amqp091-go"
 	"go.opentelemetry.io/otel"
 
@@ -16,6 +17,10 @@ import (
 const confirmTimeout = 5 * time.Second
 
 var errNacked = errors.New("broker rejected the message")
+
+// headerAggregateID carries the cargo id so the consumer can keep each
+// cargo's events in order while processing different cargoes in parallel.
+const headerAggregateID = "aggregate-id"
 
 // Publisher implements events.Publisher with publisher confirms, so a message
 // counts as published only once RabbitMQ has persisted it. The connection is
@@ -43,6 +48,9 @@ func (p *Publisher) Publish(ctx context.Context, msg events.OutboxMessage) error
 	}
 
 	headers := amqp.Table{}
+	if msg.AggregateID != uuid.Nil {
+		headers[headerAggregateID] = msg.AggregateID.String()
+	}
 	otel.GetTextMapPropagator().Inject(ctx, headerCarrier(headers))
 
 	confirmation, err := ch.PublishWithDeferredConfirmWithContext(ctx, Exchange, msg.RoutingKey, false, false, amqp.Publishing{
