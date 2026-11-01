@@ -58,6 +58,7 @@ func TestRetry_GivesUpAfterMaxAttempts(t *testing.T) {
 
 func TestRetry_StopsWhenContextIsCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	policy := backoff.Exponential{Initial: time.Hour, Max: time.Hour}
 
 	err := backoff.Retry(ctx, policy, 3, func(context.Context) error {

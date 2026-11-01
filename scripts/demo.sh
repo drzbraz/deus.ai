@@ -11,7 +11,7 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 LAST_STATUS="" LAST_BODY=""
 
-if [ -t 1 ]; then B=$'\033[1m' C=$'\033[1;36m' G=$'\033[32m' D=$'\033[2m' R=$'\033[0m'; else B="" C="" G="" D="" R=""; fi
+if [[ -t 1 ]]; then B=$'\033[1m' C=$'\033[1;36m' G=$'\033[32m' D=$'\033[2m' R=$'\033[0m'; else B="" C="" G="" D="" R=""; fi
 
 step() { printf '\n%s== %s%s\n' "$C" "$*" "$R"; }
 say()  { printf '%s%s%s\n' "$D" "$*" "$R"; }
@@ -28,7 +28,7 @@ request() {
   local method=$1 path=$2 body=$3
   shift 3
   local args=(-s -X "$method" -D "$TMP/headers" -o "$TMP/body" -w '%{http_code}')
-  if [ -n "$body" ]; then args+=(-H 'Content-Type: application/json' -d "$body"); fi
+  if [[ -n "$body" ]]; then args+=(-H 'Content-Type: application/json' -d "$body"); fi
 
   LAST_STATUS=$(curl "${args[@]}" "$@" "$BASE_URL$path")
   LAST_BODY=$(cat "$TMP/body")
@@ -38,7 +38,7 @@ request() {
 }
 
 expect() {
-  if [ "$LAST_STATUS" != "$1" ]; then
+  if [[ "$LAST_STATUS" != "$1" ]]; then
     printf 'expected HTTP %s, got %s\n' "$1" "$LAST_STATUS" >&2
     exit 1
   fi
@@ -71,7 +71,7 @@ CARGO=$(field id)
 step "3. The client retries the same request (e.g. after a timeout)"
 request POST /api/v1/cargoes "$CARGO_BODY" -H "Idempotency-Key: $KEY"
 expect 201 "same response replayed (Idempotent-Replayed: true), no duplicate cargo"
-[ "$(field id)" = "$CARGO" ] || { echo "replay returned a different cargo" >&2; exit 1; }
+[[ "$(field id)" == "$CARGO" ]] || { echo "replay returned a different cargo" >&2; exit 1; }
 
 step "4. A cargo that does not fit on the vessel"
 request POST /api/v1/cargoes "{\"name\":\"Steel\",\"weight_kg\":19000,\"vessel_id\":\"$VESSEL\"}"

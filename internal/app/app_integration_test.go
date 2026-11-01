@@ -99,18 +99,16 @@ func (c client) call(method, path, body string, headers ...string) response {
 	return response{status: resp.StatusCode, headers: resp.Header, body: raw}
 }
 
+// startApp runs the app until the test ends: t.Context() is cancelled just
+// before cleanup functions run, which triggers the graceful shutdown.
 func startApp(t *testing.T, cfg config.Config) client {
 	t.Helper()
-	ctx, cancel := context.WithCancel(context.Background())
-	application, err := app.New(ctx, cfg, zaptest.NewLogger(t, zaptest.Level(zap.WarnLevel)))
+	application, err := app.New(t.Context(), cfg, zaptest.NewLogger(t, zaptest.Level(zap.WarnLevel)))
 	require.NoError(t, err)
 
 	done := make(chan error, 1)
-	go func() { done <- application.Run(ctx) }()
-	t.Cleanup(func() {
-		cancel()
-		assert.NoError(t, <-done)
-	})
+	go func() { done <- application.Run(t.Context()) }()
+	t.Cleanup(func() { assert.NoError(t, <-done) })
 	return client{t: t, base: "http://" + application.Addr()}
 }
 

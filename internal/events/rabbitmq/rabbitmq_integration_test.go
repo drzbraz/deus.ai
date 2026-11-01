@@ -56,13 +56,14 @@ func (h *recordingHandler) received(body string) bool {
 	return false
 }
 
+// startConsumer runs a consumer until the test ends: t.Context() is cancelled
+// just before cleanup functions run, so the cleanup only waits for it to stop.
 func startConsumer(t *testing.T, handler rabbitmq.MessageHandler) {
 	t.Helper()
-	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	consumer := rabbitmq.NewConsumer(brokerURL(), handler, zap.NewNop(), backoff.Default())
-	go func() { consumer.Run(ctx); close(done) }()
-	t.Cleanup(func() { cancel(); <-done })
+	go func() { consumer.Run(t.Context()); close(done) }()
+	t.Cleanup(func() { <-done })
 }
 
 func publish(t *testing.T, publisher *rabbitmq.Publisher, body string) {
@@ -193,10 +194,9 @@ func TestConsumer_ParallelAcrossCargoesOrderedWithinCargo(t *testing.T) {
 	}
 
 	consumer := rabbitmq.NewConsumer(brokerURL(), handler, zap.NewNop(), backoff.Default(), rabbitmq.WithWorkers(8))
-	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go func() { consumer.Run(ctx); close(done) }()
-	t.Cleanup(func() { cancel(); <-done })
+	go func() { consumer.Run(t.Context()); close(done) }()
+	t.Cleanup(func() { <-done })
 
 	require.Eventually(t, func() bool { return handler.handled() == cargoes*perCargo }, 30*time.Second, 20*time.Millisecond)
 
@@ -254,21 +254,31 @@ func publishMarked(t *testing.T, marker string, n int) {
 	}
 }
 
-// runConsumer starts a consumer and returns a function that stops it and
-// reports how long the shutdown took.
-func runConsumer(handler rabbitmq.MessageHandler) func() time.Duration {
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
+// runningConsumer is a consumer a test can stop at a chosen moment.
+type runningConsumer struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
+// runConsumer starts a consumer that runs until stop is called or the test ends.
+func runConsumer(t *testing.T, handler rabbitmq.MessageHandler) *runningConsumer {
+	t.Helper()
+	ctx, cancel := context.WithCancel(t.Context())
+	rc := &runningConsumer{cancel: cancel, done: make(chan struct{})}
 	go func() {
 		rabbitmq.NewConsumer(brokerURL(), handler, zap.NewNop(), backoff.Default(), rabbitmq.WithWorkers(4)).Run(ctx)
-		close(done)
+		close(rc.done)
 	}()
-	return func() time.Duration {
-		started := time.Now()
-		cancel()
-		<-done
-		return time.Since(started)
-	}
+	t.Cleanup(func() { rc.stop() })
+	return rc
+}
+
+// stop shuts the consumer down and reports how long that took. It is safe to call twice.
+func (rc *runningConsumer) stop() time.Duration {
+	started := time.Now()
+	rc.cancel()
+	<-rc.done
+	return time.Since(started)
 }
 
 // Regression: stopping the consumer in the middle of a backlog neither
@@ -280,14 +290,13 @@ func TestConsumer_ShutdownUnderLoadLosesNothing(t *testing.T) {
 
 	first := &countingHandler{marker: marker, handled: map[string]bool{},
 		work: func(context.Context) { time.Sleep(5 * time.Millisecond) }}
-	stop := runConsumer(first)
+	consumer := runConsumer(t, first)
 	require.Eventually(t, func() bool { return first.count() >= 20 }, 15*time.Second, 5*time.Millisecond)
-	assert.Less(t, stop(), 5*time.Second, "shutdown must not hang")
+	assert.Less(t, consumer.stop(), 5*time.Second, "shutdown must not hang")
 	require.Less(t, first.count(), total, "the test must stop mid-backlog")
 
 	second := &countingHandler{marker: marker, handled: map[string]bool{}, work: func(context.Context) {}}
-	stopSecond := runConsumer(second)
-	defer stopSecond()
+	runConsumer(t, second)
 	require.Eventually(t, func() bool {
 		missing := 0
 		for i := range total {
@@ -315,7 +324,7 @@ func TestConsumer_ShutdownWithStuckWorkers(t *testing.T) {
 		stuck <- struct{}{}
 		<-ctx.Done() // blocked until shutdown, like a DB call that never returns
 	}}
-	stop := runConsumer(handler)
+	consumer := runConsumer(t, handler)
 	select {
 	case <-stuck: // with random cargo ids not every worker is guaranteed a message
 	case <-time.After(15 * time.Second):
@@ -323,12 +332,11 @@ func TestConsumer_ShutdownWithStuckWorkers(t *testing.T) {
 	}
 	time.Sleep(100 * time.Millisecond) // let the other workers pick up theirs
 
-	assert.Less(t, stop(), 5*time.Second, "stuck workers must be released by shutdown")
+	assert.Less(t, consumer.stop(), 5*time.Second, "stuck workers must be released by shutdown")
 	assert.Zero(t, handler.count())
 
 	drain := &countingHandler{marker: marker, handled: map[string]bool{}, work: func(context.Context) {}}
-	stopDrain := runConsumer(drain)
-	defer stopDrain()
+	runConsumer(t, drain)
 	require.Eventually(t, func() bool { return drain.count() == 30 }, 20*time.Second, 20*time.Millisecond,
 		"requeued messages are redelivered")
 }
