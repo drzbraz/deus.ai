@@ -160,7 +160,8 @@ func LaunchApp(t testing.TB, customize func(cfg *config.Config)) *RunningApp {
 		t.Fatalf("start app: %v", err)
 	}
 
-	running := &RunningApp{Client: NewClient(t, "http://"+application.Addr()), cancel: cancel, done: make(chan error, 1)}
+	// Plain HTTP on purpose: an in-process test server on loopback, where TLS adds nothing.
+	running := &RunningApp{Client: NewClient(t, "http://"+application.Addr()), cancel: cancel, done: make(chan error, 1)} // NOSONAR
 	go func() { running.done <- application.Run(ctx) }()
 	t.Cleanup(func() { _ = running.Stop() })
 	return running
@@ -191,7 +192,8 @@ func runApp(ctx context.Context, cfg config.Config, log *zap.Logger) (baseURL st
 
 	done := make(chan error, 1)
 	go func() { done <- application.Run(ctx) }()
-	return "http://" + application.Addr(), func() { cancel(); <-done }, nil
+	// Plain HTTP on purpose: an in-process test server on loopback, where TLS adds nothing.
+	return "http://" + application.Addr(), func() { cancel(); <-done }, nil // NOSONAR
 }
 
 func connectDB(ctx context.Context, url string) (*pgxpool.Pool, error) {
