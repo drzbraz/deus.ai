@@ -1,6 +1,8 @@
 # Logistics API — DEUS Go Backend Challenge
 
 [![CI](https://github.com/drzbraz/deus.ai/actions/workflows/ci.yml/badge.svg)](https://github.com/drzbraz/deus.ai/actions/workflows/ci.yml)
+[![Quality Gate](https://sonarcloud.io/api/project_badges/measure?project=drzbraz_deus.ai&metric=alert_status)](https://sonarcloud.io/project/overview?id=drzbraz_deus.ai)
+[![Coverage](https://sonarcloud.io/api/project_badges/measure?project=drzbraz_deus.ai&metric=coverage)](https://sonarcloud.io/project/overview?id=drzbraz_deus.ai)
 
 A Go REST API that tracks **cargoes**, the **vessels** that carry them and the **movement history** of every cargo.
 It includes the bonus **event-driven pipeline**: each cargo status change is published to RabbitMQ and stored by a background consumer.
@@ -402,8 +404,11 @@ Besides the unit and integration tests next to the code, [`tests/`](tests/README
 | Unit tests | `make test` with the race detector |
 | Integration, e2e, resilience & schema | Postgres and RabbitMQ as service containers; every suite with `-race`; **fails under 80% coverage**; coverage report uploaded as an artifact |
 | Docker stack + black-box e2e | builds the image, boots the full `docker-compose` stack, runs the e2e and schema suites against it over HTTP |
+| SonarQube Cloud | imports the coverage and golangci-lint reports and applies the quality gate; results are public on the [dashboard](https://sonarcloud.io/project/overview?id=drzbraz_deus.ai) and posted on each pull request |
 
 Tool versions are pinned in the `Makefile` and the workflow, so local runs and CI behave the same.
+
+**SonarQube Cloud setup** (one-time, for forks of this repository): import the repository on sonarcloud.io, turn off *Automatic Analysis* (CI-based analysis is what brings in coverage), and add the project token as the `SONAR_TOKEN` repository secret. The keys in `sonar-project.properties` must match the project. Without the secret the job skips itself instead of failing.
 
 ---
 
@@ -475,6 +480,7 @@ idempotency_keys  (stored responses for Idempotency-Key)
 ```
 .github/workflows/ci.yml     CI: lint, vulnerability scan, every test suite, Docker stack test
 .golangci.yml                linter configuration
+sonar-project.properties     SonarQube Cloud analysis settings
 api/openapi.yaml             OpenAPI 3 contract (embedded; served at /openapi.yaml and /docs)
 cmd/api/                     entry point (config, logger, signals)
 internal/

@@ -2,3 +2,4 @@ bin/
 coverage.out
 coverage.html
 .DS_Store
+golangci-report.xml
