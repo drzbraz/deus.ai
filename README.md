@@ -60,7 +60,7 @@ Then open **http://localhost:8080/docs** to try the API in Swagger UI. `make doc
 | Requirement | ✓ | Where | How to verify |
 |---|---|---|---|
 | PostgreSQL | ✅ | PostgreSQL 16, `pgx/v5` | `docker-compose.yml` |
-| Relationships between cargoes, vessels and tracking | ✅ | foreign keys `cargoes.vessel_id`, `tracking_entries.cargo_id`, `cargo_events.cargo_id` (`ON DELETE RESTRICT`) | `TestSchema_ReferencedRowsCannotBeDeleted` |
+| Relationships between cargoes, vessels and tracking | ✅ | [ER diagram](#data-model-er-diagram); foreign keys `cargoes.vessel_id`, `tracking_entries.cargo_id`, `cargo_events.cargo_id` (`ON DELETE RESTRICT`) | `TestSchema_ReferencedRowsCannotBeDeleted` |
 | Data integrity, indexing, normalization | ✅ | `CHECK` / `NOT NULL` / `UNIQUE` constraints, a status enum, indexes matching every query | `TestSchema_CargoConstraints`, `TestSchema_ExpectedIndexesExist` |
 | DB migrations | ✅ | raw SQL with golang-migrate, embedded in the binary, applied at startup (`migrations/`) | `TestMigrations_RoundTripDownAndUp` (up → down → up on a fresh database) |
 
@@ -519,7 +519,9 @@ Tool versions are pinned in the `Makefile` and the workflow, and Go itself comes
 
 ## Design decisions
 
-**Architecture: ports and adapters.** `domain` holds the entities and rules (no dependencies). `service` holds the use cases and *declares* the interfaces it needs. `repository/postgres` and `events/rabbitmq` are adapters that implement them. `transport/httpapi` is the REST edge. `internal/app` is the single composition root where everything is wired with constructor injection, with no globals.
+### Architecture
+
+**Ports and adapters.** `domain` holds the entities and rules (no dependencies). `service` holds the use cases and *declares* the interfaces it needs. `repository/postgres` and `events/rabbitmq` are adapters that implement them. `transport/httpapi` is the REST edge. `internal/app` is the single composition root where everything is wired with constructor injection, with no globals.
 
 | Pattern | Where | Why |
 |---|---|---|
@@ -534,20 +536,92 @@ Tool versions are pinned in the `Makefile` and the workflow, and Go itself comes
 | Functional options | `events.NewRelay(..., WithInterval(), WithBatchSize())` | readable constructors with sane defaults |
 | DTO + mapper | `transport/httpapi/dto.go` | the API contract is independent of domain structs |
 
-**Data model.**
+### Data model (ER diagram)
 
+```mermaid
+erDiagram
+    vessels ||--o{ cargoes : "carries"
+    cargoes ||--o{ tracking_entries : "movement history"
+    cargoes ||--o{ cargo_events : "consumed status events"
+    cargoes ||..o{ outbox : "events to publish (logical link, no FK)"
+
+    vessels {
+        uuid id PK
+        text name UK "unique, not blank"
+        numeric capacity_kg "greater than 0"
+        text current_location "not blank"
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    cargoes {
+        uuid id PK
+        uuid vessel_id FK "ON DELETE RESTRICT"
+        text name "not blank"
+        text description
+        numeric weight_kg "greater than 0"
+        cargo_status status "pending, in_transit, delivered"
+        integer version "optimistic locking (ETag)"
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    tracking_entries {
+        uuid id PK
+        uuid cargo_id FK "ON DELETE RESTRICT"
+        cargo_status status "status at that moment"
+        text location "not blank"
+        text note
+        timestamptz recorded_at
+    }
+    cargo_events {
+        uuid id PK "the event_id, makes consumption idempotent"
+        uuid cargo_id FK "ON DELETE RESTRICT"
+        cargo_status old_status
+        cargo_status new_status
+        timestamptz occurred_at
+        timestamptz received_at
+    }
+    outbox {
+        uuid id PK "the event_id"
+        uuid aggregate_id "cargo id"
+        text event_type
+        jsonb payload "event message"
+        jsonb headers "trace context"
+        timestamptz created_at
+        timestamptz published_at "NULL while pending"
+        integer attempts
+        text last_error
+    }
+    idempotency_keys {
+        text scope PK
+        text key PK
+        text request_hash
+        integer status_code
+        jsonb response_headers
+        bytea response_body "first response, replayed"
+        timestamptz created_at
+    }
 ```
-vessels 1 ──< cargoes 1 ──< tracking_entries   (append-only)
-                      1 ──< cargo_events       (append-only, filled by the consumer)
-outbox            (events waiting to be published)
-idempotency_keys  (stored responses for Idempotency-Key)
-```
+
+How to read it: a solid line is a real foreign key (`||--o{` means "one to zero or many"); the dashed line from `cargoes` to `outbox` is a logical link only. The outbox stores the cargo id but deliberately has no foreign key: it is a queue of messages, not part of the domain model.
+
+| Table | Role |
+|---|---|
+| `vessels` | ships, with capacity and current location |
+| `cargoes` | goods; each belongs to exactly one vessel. `status` is a PostgreSQL enum; `version` backs `ETag` / `If-Match` |
+| `tracking_entries` | the cargo's movement history. **Append-only**: triggers reject `UPDATE`, `DELETE` and `TRUNCATE` |
+| `cargo_events` | status-change events stored by the RabbitMQ consumer (the bonus). Append-only; the primary key is the event id, so a redelivered event is stored once |
+| `outbox` | events committed with the status change, waiting for the relay to publish them |
+| `idempotency_keys` | the first response for each `Idempotency-Key`, replayed for retries and duplicates (composite primary key `scope` + `key`) |
+
+`load_kg` (vessel) and `current_location` (cargo) are not columns: they are derived on read from `cargoes` and `tracking_entries`, so they can never drift from the data they summarise.
 
 - Foreign keys use `ON DELETE RESTRICT`. `CHECK` constraints back the domain validation (weight > 0, etc.), `cargo_status` is a Postgres enum, and vessel names are unique.
 - Indexes match the queries: `(cargo_id, recorded_at)` for history, `(vessel_id, status)` for load and filters, a partial index on unpublished outbox rows, and `created_at` for idempotency cleanup.
 - **Auditability is enforced by the database, not just the code.** A trigger rejects `UPDATE`, `DELETE` and `TRUNCATE` on `tracking_entries` and `cargo_events`. Cargo has no `DELETE` endpoint.
 - IDs are **UUIDv7**: time-ordered, which keeps B-tree inserts local.
 - Migrations are plain SQL, embedded in the binary and applied at startup. golang-migrate takes an advisory lock, so replicas cannot migrate twice.
+
+### Libraries, credentials and locking
 
 **Why these libraries.** chi gives `net/http`-compatible routing, plus the route pattern needed for metric labels. zap is listed in the spec and gives fast structured logs. pgx with raw SQL keeps queries explicit and reviewable (locking clauses like `FOR UPDATE SKIP LOCKED` would fight an ORM). amqp091-go is the official RabbitMQ client.
 
