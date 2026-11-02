@@ -521,6 +521,80 @@ Tool versions are pinned in the `Makefile` and the workflow, and Go itself comes
 
 ### Architecture
 
+#### Services (what `make docker-run` starts)
+
+```mermaid
+flowchart LR
+    client(["Client<br/>curl, Swagger UI"])
+
+    subgraph api["api container :8080, one Go process"]
+        http["REST API<br/>chi router + handlers"]
+        relay["Outbox relay<br/>goroutine"]
+        consumer["Event consumer<br/>sharded worker pool"]
+        cleanup["Idempotency cleanup<br/>goroutine"]
+    end
+
+    pg[("PostgreSQL 16<br/>host :5433")]
+    mq[["RabbitMQ 4.4<br/>exchange cargo.events<br/>queue cargo.status_changed<br/>DLQ cargo.status_changed.dlq<br/>UI :15672"]]
+
+    subgraph obs["Observability"]
+        otel["OTel Collector<br/>:4317"]
+        jaeger["Jaeger<br/>traces :16686"]
+        prom["Prometheus<br/>metrics :9090"]
+        grafana["Grafana<br/>dashboard :3000"]
+    end
+
+    client -->|"HTTP JSON"| http
+    http -->|"1 transaction: cargo + tracking + outbox + idempotency key"| pg
+    relay -->|"claim pending outbox rows"| pg
+    relay -->|"publish + confirm"| mq
+    mq -->|"deliver, manual ack"| consumer
+    consumer -->|"INSERT cargo_events ON CONFLICT DO NOTHING"| pg
+    cleanup -->|"delete keys older than 24h"| pg
+
+    api -.->|"OTLP traces + metrics"| otel
+    otel -.-> jaeger
+    prom -.->|"scrape :8889"| otel
+    grafana -.-> prom
+    grafana -.-> jaeger
+```
+
+Solid arrows are the request and event flow; dotted arrows are telemetry. The relay and consumer live in the API process for simplicity, and `RELAY_ENABLED` / `CONSUMER_ENABLED` let them run as separate deployments. Each step of the event path is described in [Event pipeline](#event-pipeline-bonus).
+
+#### Code layers (ports and adapters)
+
+```mermaid
+flowchart TB
+    main["cmd/api/main.go"] --> app["internal/app<br/>composition root, wires everything"]
+
+    httpapi["transport/httpapi<br/>handlers, DTOs, middleware, idempotency guard"]
+
+    subgraph core["Core, no infrastructure imports"]
+        service["service<br/>use cases + their ports"]
+        events["events<br/>outbox relay, event handler + their ports"]
+        domain["domain<br/>entities, status state machine, errors"]
+    end
+
+    subgraph adapters["Infrastructure adapters"]
+        postgres["repository/postgres<br/>repositories, TxManager, outbox store"]
+        rabbit["events/rabbitmq<br/>publisher, consumer, topology"]
+    end
+
+    app --> httpapi
+    app --> postgres
+    app --> rabbit
+    httpapi --> service
+    service --> domain
+    events --> domain
+    postgres -. "implements ports" .-> service
+    postgres -. "implements ports" .-> events
+    rabbit -. "implements Publisher,<br/>feeds the handler" .-> events
+```
+
+Arrows point in the direction of the dependency. The core never imports an adapter: `service` and `events` declare the interfaces (ports) they need, and the adapters implement them, so tests replace Postgres and RabbitMQ with in-memory fakes.
+
+#### Patterns
+
 **Ports and adapters.** `domain` holds the entities and rules (no dependencies). `service` holds the use cases and *declares* the interfaces it needs. `repository/postgres` and `events/rabbitmq` are adapters that implement them. `transport/httpapi` is the REST edge. `internal/app` is the single composition root where everything is wired with constructor injection, with no globals.
 
 | Pattern | Where | Why |
